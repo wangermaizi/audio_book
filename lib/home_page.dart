@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'home_api.dart';
 import 'home_models.dart';
+import 'search_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -14,6 +15,8 @@ class _HomePageState extends State<HomePage> {
   late final Future<HomeData> _future;
   final HomeApi _api = HomeApi();
 
+  final TextEditingController _searchController = TextEditingController();
+
   @override
   void initState() {
     super.initState();
@@ -23,12 +26,11 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('一夜听书网'),
-      ),
-      body: FutureBuilder<HomeData>(
-        future: _future,
-        builder: (context, snapshot) {
+      appBar: null,
+      body: SafeArea(
+        child: FutureBuilder<HomeData>(
+          future: _future,
+          builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
@@ -64,39 +66,85 @@ class _HomePageState extends State<HomePage> {
             );
           }
 
-          final data = snapshot.data;
-          if (data == null) {
-            return const Center(child: Text('没有数据'));
-          }
+            final data = snapshot.data;
+            if (data == null) {
+              return const Center(child: Text('没有数据'));
+            }
 
-          return RefreshIndicator(
-            onRefresh: () async {
-              setState(() {
-                _future = _api.fetchHome();
-              });
-              await _future;
-            },
-            child: ListView(
-              children: [
-                _buildBanner(context, data.banners),
-                const SizedBox(height: 16),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Text(
-                    '有声小说推荐收听',
-                    style: Theme.of(context)
-                        .textTheme
-                        .titleLarge
-                        ?.copyWith(fontWeight: FontWeight.bold),
+            return RefreshIndicator(
+              onRefresh: () async {
+                setState(() {
+                  _future = _api.fetchHome();
+                });
+                await _future;
+              },
+              child: ListView(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                    child: _buildSearchBar(context),
                   ),
-                ),
-                const SizedBox(height: 8),
-                ...data.recommendBooks
-                    .map((b) => _buildRecommendItem(context, b)),
-              ],
+                  _buildBanner(context, data.banners),
+                  const SizedBox(height: 16),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Text(
+                      '有声小说推荐收听',
+                      style: Theme.of(context)
+                          .textTheme
+                          .titleLarge
+                          ?.copyWith(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ...data.recommendBooks
+                      .map((b) => _buildRecommendItem(context, b)),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchBar(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: _searchController,
+            textInputAction: TextInputAction.search,
+            onSubmitted: _onSearchSubmitted,
+            decoration: InputDecoration(
+              hintText: '搜索有声小说',
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(999),
+              ),
+              prefixIcon: const Icon(Icons.search),
             ),
-          );
-        },
+          ),
+        ),
+        const SizedBox(width: 8),
+        ElevatedButton(
+          onPressed: () => _onSearchSubmitted(_searchController.text),
+          child: const Text('搜索'),
+        ),
+      ],
+    );
+  }
+
+  void _onSearchSubmitted(String value) {
+    final query = value.trim();
+    if (query.isEmpty) {
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SearchPage(query: query),
       ),
     );
   }
