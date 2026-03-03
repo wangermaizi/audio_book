@@ -2,17 +2,18 @@ import 'package:dio/dio.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:html/dom.dart' as dom;
 
-import 'home_models.dart';
+import 'package:audio_book/core/network/api_client.dart';
+import 'package:audio_book/features/home/home_models.dart';
 
 class HomeApi {
-  HomeApi({Dio? dio}) : _dio = dio ?? Dio();
+  HomeApi({ApiClient? client}) : _client = client ?? ApiClient();
 
-  final Dio _dio;
+  final ApiClient _client;
 
   static const String _baseUrl = 'https://m.huanting.cc';
 
   Future<HomeData> fetchHome() async {
-    final response = await _dio.get<String>(
+    final response = await _client.dio.get<String>(
       _baseUrl,
       options: Options(
         responseType: ResponseType.plain,
@@ -49,6 +50,7 @@ class HomeApi {
         title: title,
         imageUrl: src,
         link: _absoluteUrl(href),
+        bookId: _extractBookId(href),
       );
     }).toList();
   }
@@ -58,10 +60,10 @@ class HomeApi {
 
     final section = document
         .querySelectorAll('section')
-        .firstWhere((e) => e.text.contains('有声小说推荐收听'), orElse: () => dom.Element.tag('section'));
+        .firstWhere((e) => e.text.contains('有声小说推荐收听'),
+            orElse: () => dom.Element.tag('section'));
 
-    final header =
-        section.querySelector('h2.cat_tit');
+    final header = section.querySelector('h2.cat_tit');
     if (section.children.isEmpty || header == null) {
       return result;
     }
@@ -72,15 +74,12 @@ class HomeApi {
       return result;
     }
 
-    for (var i = startIndex + 1;
-        i < parentChildren.length;
-        i++) {
+    for (var i = startIndex + 1; i < parentChildren.length; i++) {
       final node = parentChildren[i];
       if (node.localName == 'h5') {
         break;
       }
-      if (node.localName == 'a' &&
-          node.classes.contains('bookbox')) {
+      if (node.localName == 'a' && node.classes.contains('bookbox')) {
         final book = _parseRecommendBook(node);
         if (book != null) {
           result.add(book);
@@ -98,16 +97,11 @@ class HomeApi {
     final cover =
         img?.attributes['data-original'] ?? img?.attributes['src'] ?? '';
 
-    final title =
-        a.querySelector('.bookinfo .bookname')?.text.trim() ?? '';
-    final author =
-        a.querySelector('.bookinfo .author')?.text.trim() ?? '';
-    final category =
-        a.querySelector('.bookinfo .cat')?.text.trim() ?? '';
+    final title = a.querySelector('.bookinfo .bookname')?.text.trim() ?? '';
+    final author = a.querySelector('.bookinfo .author')?.text.trim() ?? '';
+    final category = a.querySelector('.bookinfo .cat')?.text.trim() ?? '';
     final summary =
-        a.querySelector('.bookinfo .intro, .bookinfo p.intro')
-                ?.text
-                .trim() ??
+        a.querySelector('.bookinfo .intro, .bookinfo p.intro')?.text.trim() ??
             '';
 
     if (title.isEmpty) {
@@ -121,6 +115,7 @@ class HomeApi {
       coverUrl: cover,
       link: _absoluteUrl(href),
       summary: summary,
+      bookId: _extractBookId(href),
     );
   }
 
@@ -132,6 +127,15 @@ class HomeApi {
       return '$_baseUrl/$href';
     }
     return '$_baseUrl$href';
+  }
+
+  String _extractBookId(String href) {
+    final reg = RegExp(r'/book/(\d+)\.html');
+    final match = reg.firstMatch(href);
+    if (match != null && match.groupCount >= 1) {
+      return match.group(1) ?? '';
+    }
+    return '';
   }
 }
 

@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 
-import 'home_api.dart';
-import 'home_models.dart';
-import 'search_page.dart';
+import 'package:audio_book/core/network/api_client.dart';
+import 'package:audio_book/features/home/home_api.dart';
+import 'package:audio_book/features/home/home_models.dart';
+import 'package:audio_book/features/search/search_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -16,6 +17,10 @@ class _HomePageState extends State<HomePage> {
   final HomeApi _api = HomeApi();
 
   final TextEditingController _searchController = TextEditingController();
+  final TextEditingController _cookieController = TextEditingController();
+
+  int _titleTapCount = 0;
+  DateTime? _lastTitleTapTime;
 
   @override
   void initState() {
@@ -31,40 +36,40 @@ class _HomePageState extends State<HomePage> {
         child: FutureBuilder<HomeData>(
           future: _future,
           builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('加载首页失败'),
-                    const SizedBox(height: 8),
-                    Text(
-                      '${snapshot.error}',
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodySmall
-                          ?.copyWith(color: Colors.red),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: () {
-                        setState(() {
-                          _future = _api.fetchHome();
-                        });
-                      },
-                      child: const Text('重试'),
-                    ),
-                  ],
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (snapshot.hasError) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('加载首页失败'),
+                      const SizedBox(height: 8),
+                      Text(
+                        '${snapshot.error}',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: Colors.red),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 16),
+                      ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            _future = _api.fetchHome();
+                          });
+                        },
+                        child: const Text('重试'),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            );
-          }
+              );
+            }
 
             final data = snapshot.data;
             if (data == null) {
@@ -89,12 +94,15 @@ class _HomePageState extends State<HomePage> {
                   const SizedBox(height: 16),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Text(
-                      '有声小说推荐收听',
-                      style: Theme.of(context)
-                          .textTheme
-                          .titleLarge
-                          ?.copyWith(fontWeight: FontWeight.bold),
+                    child: GestureDetector(
+                      onTap: _onRecommendTitleTap,
+                      child: Text(
+                        '有声小说推荐收听',
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleLarge
+                            ?.copyWith(fontWeight: FontWeight.bold),
+                      ),
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -110,30 +118,22 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildSearchBar(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: TextField(
-            controller: _searchController,
-            textInputAction: TextInputAction.search,
-            onSubmitted: _onSearchSubmitted,
-            decoration: InputDecoration(
-              hintText: '搜索有声小说',
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(999),
-              ),
-              prefixIcon: const Icon(Icons.search),
-            ),
-          ),
+    return TextField(
+      controller: _searchController,
+      textInputAction: TextInputAction.search,
+      onSubmitted: _onSearchSubmitted,
+      decoration: InputDecoration(
+        hintText: '搜索有声小说',
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(999),
         ),
-        const SizedBox(width: 8),
-        ElevatedButton(
+        suffixIcon: IconButton(
+          icon: const Icon(Icons.search),
           onPressed: () => _onSearchSubmitted(_searchController.text),
-          child: const Text('搜索'),
         ),
-      ],
+      ),
     );
   }
 
@@ -146,6 +146,58 @@ class _HomePageState extends State<HomePage> {
       MaterialPageRoute(
         builder: (_) => SearchPage(query: query),
       ),
+    );
+  }
+
+  void _onRecommendTitleTap() {
+    final now = DateTime.now();
+    if (_lastTitleTapTime == null ||
+        now.difference(_lastTitleTapTime!) > const Duration(seconds: 2)) {
+      _titleTapCount = 0;
+    }
+    _lastTitleTapTime = now;
+    _titleTapCount++;
+    if (_titleTapCount >= 3) {
+      _titleTapCount = 0;
+      _showCookieDialog();
+    }
+  }
+
+  Future<void> _showCookieDialog() async {
+    _cookieController.text = ApiClient().cookie ?? '';
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('设置 Cookie'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: TextField(
+              controller: _cookieController,
+              maxLines: 5,
+              decoration: const InputDecoration(
+                hintText: '在这里粘贴从网页复制的 Cookie',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+              child: const Text('取消'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                ApiClient().setCookie(_cookieController.text);
+                Navigator.of(context).pop();
+              },
+              child: const Text('确认'),
+            ),
+          ],
+        );
+      },
     );
   }
 

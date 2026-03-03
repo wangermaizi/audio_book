@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 
-import 'search_api.dart';
-import 'search_models.dart';
+import 'package:audio_book/features/book_detail/book_detail_page.dart';
+import 'package:audio_book/features/search/search_api.dart';
+import 'package:audio_book/features/search/search_models.dart';
 
 class SearchPage extends StatefulWidget {
   const SearchPage({
@@ -97,7 +98,20 @@ class _SearchPageState extends State<SearchPage> {
         ),
         child: InkWell(
           onTap: () {
-            // 之后可以跳转到书籍详情页
+            final reg = RegExp(r'/book/(\d+)\.html');
+            final match = reg.firstMatch(item.link);
+            final bookId = match != null && match.groupCount >= 1
+                ? (match.group(1) ?? '')
+                : '';
+
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => BookDetailPage(
+                  bookId: bookId,
+                  initialTitle: item.title,
+                ),
+              ),
+            );
           },
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,

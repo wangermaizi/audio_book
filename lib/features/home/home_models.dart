@@ -3,11 +3,13 @@ class HomeBanner {
     required this.title,
     required this.imageUrl,
     required this.link,
+    required this.bookId,
   });
 
   final String title;
   final String imageUrl;
   final String link;
+  final String bookId;
 }
 
 class HomeRecommendBook {
@@ -18,6 +20,7 @@ class HomeRecommendBook {
     required this.coverUrl,
     required this.link,
     required this.summary,
+    required this.bookId,
   });
 
   final String title;
@@ -26,6 +29,7 @@ class HomeRecommendBook {
   final String coverUrl;
   final String link;
   final String summary;
+  final String bookId;
 }
 
 class HomeData {

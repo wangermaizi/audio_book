@@ -2,17 +2,18 @@ import 'package:dio/dio.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:html/dom.dart' as dom;
 
-import 'search_models.dart';
+import 'package:audio_book/core/network/api_client.dart';
+import 'package:audio_book/features/search/search_models.dart';
 
 class SearchApi {
-  SearchApi({Dio? dio}) : _dio = dio ?? Dio();
+  SearchApi({ApiClient? client}) : _client = client ?? ApiClient();
 
-  final Dio _dio;
+  final ApiClient _client;
 
   static const String _baseUrl = 'https://m.huanting.cc';
 
   Future<List<SearchResultItem>> search(String query) async {
-    final response = await _dio.get<String>(
+    final response = await _client.dio.get<String>(
       '$_baseUrl/Ms.php',
       queryParameters: {'q': query},
       options: Options(
