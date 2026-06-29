@@ -256,10 +256,10 @@ class _BookDetailPageState extends State<BookDetailPage> {
   }
 
   String _extractFeatureKey(String playUrl) {
-    final reg = RegExp(r'/ting/([^/]+)\.html');
+    final reg = RegExp(r'/play/([^/]+)\.html|/ting/([^/]+)\.html');
     final match = reg.firstMatch(playUrl);
-    if (match != null && match.groupCount >= 1) {
-      return match.group(1) ?? '';
+    if (match != null) {
+      return match.group(1) ?? match.group(2) ?? '';
     }
     return playUrl;
   }

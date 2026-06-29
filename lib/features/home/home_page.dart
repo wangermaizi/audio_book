@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:audio_book/core/network/api_client.dart';
+import 'package:audio_book/features/book_detail/book_detail_page.dart';
 import 'package:audio_book/features/home/home_api.dart';
 import 'package:audio_book/features/home/home_models.dart';
 import 'package:audio_book/features/search/search_page.dart';
@@ -189,8 +190,9 @@ class _HomePageState extends State<HomePage> {
               child: const Text('取消'),
             ),
             ElevatedButton(
-              onPressed: () {
-                ApiClient().setCookie(_cookieController.text);
+              onPressed: () async {
+                await ApiClient().setCookie(_cookieController.text);
+                if (!context.mounted) return;
                 Navigator.of(context).pop();
               },
               child: const Text('确认'),
@@ -232,7 +234,7 @@ class _HomePageState extends State<HomePage> {
                         end: Alignment.bottomCenter,
                         colors: [
                           Colors.transparent,
-                          Colors.black.withOpacity(0.6),
+                          Colors.black.withValues(alpha: 0.6),
                         ],
                       ),
                     ),
@@ -269,7 +271,17 @@ class _HomePageState extends State<HomePage> {
           borderRadius: BorderRadius.circular(12),
         ),
         child: InkWell(
-          onTap: () {},
+          onTap: () {
+            if (book.bookId.isEmpty) return;
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => BookDetailPage(
+                  bookId: book.bookId,
+                  initialTitle: book.title,
+                ),
+              ),
+            );
+          },
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [

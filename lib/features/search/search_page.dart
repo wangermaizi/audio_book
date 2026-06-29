@@ -98,10 +98,10 @@ class _SearchPageState extends State<SearchPage> {
         ),
         child: InkWell(
           onTap: () {
-            final reg = RegExp(r'/book/(\d+)\.html');
+            final reg = RegExp(r'/youshengxiaoshuo/(\d+)/|/book/(\d+)\.html');
             final match = reg.firstMatch(item.link);
-            final bookId = match != null && match.groupCount >= 1
-                ? (match.group(1) ?? '')
+            final bookId = match != null
+                ? (match.group(1) ?? match.group(2) ?? '')
                 : '';
 
             Navigator.of(context).push(

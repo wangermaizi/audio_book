@@ -1,14 +1,13 @@
+import 'package:audio_session/audio_session.dart';
 import 'package:flutter/material.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:just_audio_background/just_audio_background.dart';
 
 import 'package:audio_book/core/logger/file_logger.dart';
 import 'package:audio_book/features/player/player_api.dart';
 
 class PlayerPage extends StatefulWidget {
-  const PlayerPage({
-    super.key,
-    required this.featureKey,
-    required this.title,
-  });
+  const PlayerPage({super.key, required this.featureKey, required this.title});
 
   final String featureKey;
   final String title;
@@ -18,74 +17,375 @@ class PlayerPage extends StatefulWidget {
 }
 
 class _PlayerPageState extends State<PlayerPage> {
-  late Future<String> _future;
+  late Future<PlayerInfo> _future;
+  late final AudioPlayer _player;
   final PlayerApi _api = PlayerApi();
+
+  PlayerInfo? _info;
+  double _speed = 1;
+  bool _audioReady = false;
+  String? _playerError;
 
   @override
   void initState() {
     super.initState();
-    _future = _api.fetchPlayHtml(widget.featureKey);
+    _player = AudioPlayer();
+    _future = _load();
+  }
+
+  @override
+  void dispose() {
+    _player.dispose();
+    super.dispose();
+  }
+
+  Future<PlayerInfo> _load() async {
+    setState(() {
+      _audioReady = false;
+      _playerError = null;
+    });
+
+    final session = await AudioSession.instance;
+    await session.configure(const AudioSessionConfiguration.speech());
+
+    final info = await _api.fetchPlayInfo(widget.featureKey);
+    FileLogger().logPlayHtml(featureKey: widget.featureKey, html: info.rawHtml);
+
+    await _player.setAudioSource(
+      AudioSource.uri(
+        Uri.parse(info.audioUrl),
+        tag: MediaItem(
+          id: info.featureKey,
+          title: info.title.isEmpty ? widget.title : info.title,
+          album: info.bookName.isEmpty ? null : info.bookName,
+          artUri: info.coverUrl.isEmpty ? null : Uri.tryParse(info.coverUrl),
+        ),
+      ),
+    );
+    await _player.setSpeed(_speed);
+
+    if (mounted) {
+      setState(() {
+        _info = info;
+        _audioReady = true;
+      });
+    }
+
+    return info;
+  }
+
+  Future<void> _retry() async {
+    await _player.stop();
+    setState(() {
+      _info = null;
+      _audioReady = false;
+      _playerError = null;
+      _future = _load();
+    });
+  }
+
+  Future<void> _togglePlay() async {
+    if (!_audioReady) {
+      return;
+    }
+    try {
+      if (_player.playing) {
+        await _player.pause();
+      } else {
+        await _player.play();
+      }
+    } on PlayerException catch (error) {
+      setState(() => _playerError = error.message);
+    } on PlayerInterruptedException catch (error) {
+      setState(() => _playerError = error.message);
+    }
+  }
+
+  Future<void> _changeSpeed(double speed) async {
+    setState(() => _speed = speed);
+    await _player.setSpeed(speed);
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.title),
-      ),
-      body: FutureBuilder<String>(
+      appBar: AppBar(title: Text(widget.title)),
+      body: FutureBuilder<PlayerInfo>(
         future: _future,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
           if (snapshot.hasError) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('加载播放页失败'),
-                    const SizedBox(height: 8),
-                    Text(
-                      '${snapshot.error}',
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodySmall
-                          ?.copyWith(color: Colors.red),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: () {
-                        setState(() {
-                          _future =
-                              _api.fetchPlayHtml(widget.featureKey);
-                        });
-                      },
-                      child: const Text('重试'),
-                    ),
-                  ],
-                ),
-              ),
-            );
+            return _ErrorView(error: snapshot.error, onRetry: _retry);
           }
 
-          final html = snapshot.data ?? '';
+          final info = snapshot.data ?? _info;
+          if (info == null) {
+            return _ErrorView(error: '没有播放数据', onRetry: _retry);
+          }
 
-          // 全量内容写入本地 log 文件
-          FileLogger().logPlayHtml(
-            featureKey: widget.featureKey,
-            html: html,
-          );
-
-          return const Center(
-            child: Text('播放页 HTML 已写入 player_html.log'),
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              _buildHeader(context, info),
+              const SizedBox(height: 24),
+              _buildControls(context),
+              if (_playerError != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _playerError!,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: Colors.red),
+                ),
+              ],
+              if (info.message.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text(
+                  info.message,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Colors.orange.shade800,
+                  ),
+                ),
+              ],
+            ],
           );
         },
       ),
     );
   }
+
+  Widget _buildHeader(BuildContext context, PlayerInfo info) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: SizedBox(
+            width: 104,
+            height: 140,
+            child: info.coverUrl.isEmpty
+                ? Container(color: Colors.black12)
+                : Image.network(info.coverUrl, fit: BoxFit.cover),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                info.title.isEmpty ? widget.title : info.title,
+                style: Theme.of(
+                  context,
+                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+              ),
+              if (info.bookName.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(info.bookName),
+              ],
+              const SizedBox(height: 8),
+              Text(
+                '接口状态：${info.status.isEmpty ? '已返回音频' : info.status}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildControls(BuildContext context) {
+    return Card(
+      elevation: 1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            StreamBuilder<Duration>(
+              stream: _player.positionStream,
+              initialData: Duration.zero,
+              builder: (context, snapshot) {
+                final position = snapshot.data ?? Duration.zero;
+                return StreamBuilder<Duration?>(
+                  stream: _player.durationStream,
+                  initialData: _player.duration,
+                  builder: (context, durationSnapshot) {
+                    final duration = durationSnapshot.data ?? Duration.zero;
+                    final max = duration.inMilliseconds.toDouble();
+                    final value = position.inMilliseconds
+                        .clamp(0, duration.inMilliseconds)
+                        .toDouble();
+
+                    return Column(
+                      children: [
+                        Slider(
+                          min: 0,
+                          max: max <= 0 ? 1 : max,
+                          value: max <= 0 ? 0 : value,
+                          onChanged: max <= 0
+                              ? null
+                              : (next) {
+                                  _player.seek(
+                                    Duration(milliseconds: next.round()),
+                                  );
+                                },
+                        ),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(_formatDuration(position)),
+                            Text(_formatDuration(duration)),
+                          ],
+                        ),
+                      ],
+                    );
+                  },
+                );
+              },
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton.filledTonal(
+                  tooltip: '后退 15 秒',
+                  onPressed: _audioReady
+                      ? () => _seekRelative(const Duration(seconds: -15))
+                      : null,
+                  icon: const Icon(Icons.replay_10),
+                ),
+                const SizedBox(width: 16),
+                StreamBuilder<PlayerState>(
+                  stream: _player.playerStateStream,
+                  initialData: _player.playerState,
+                  builder: (context, snapshot) {
+                    final state = snapshot.data;
+                    final processing =
+                        state?.processingState ?? ProcessingState.idle;
+                    final buffering =
+                        processing == ProcessingState.loading ||
+                        processing == ProcessingState.buffering;
+                    final completed = processing == ProcessingState.completed;
+
+                    if (buffering) {
+                      return const SizedBox(
+                        width: 56,
+                        height: 56,
+                        child: Padding(
+                          padding: EdgeInsets.all(12),
+                          child: CircularProgressIndicator(strokeWidth: 3),
+                        ),
+                      );
+                    }
+
+                    return IconButton.filled(
+                      tooltip: completed
+                          ? '重新播放'
+                          : (_player.playing ? '暂停' : '播放'),
+                      onPressed: _audioReady
+                          ? () async {
+                              if (completed) {
+                                await _player.seek(Duration.zero);
+                              }
+                              await _togglePlay();
+                            }
+                          : null,
+                      iconSize: 32,
+                      icon: Icon(
+                        _player.playing && !completed
+                            ? Icons.pause
+                            : Icons.play_arrow,
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(width: 16),
+                IconButton.filledTonal(
+                  tooltip: '前进 15 秒',
+                  onPressed: _audioReady
+                      ? () => _seekRelative(const Duration(seconds: 15))
+                      : null,
+                  icon: const Icon(Icons.forward_10),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            SegmentedButton<double>(
+              segments: const [
+                ButtonSegment(value: 0.75, label: Text('0.75x')),
+                ButtonSegment(value: 1, label: Text('1x')),
+                ButtonSegment(value: 1.25, label: Text('1.25x')),
+                ButtonSegment(value: 1.5, label: Text('1.5x')),
+                ButtonSegment(value: 2, label: Text('2x')),
+              ],
+              selected: {_speed},
+              onSelectionChanged: _audioReady
+                  ? (values) => _changeSpeed(values.first)
+                  : null,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _seekRelative(Duration offset) async {
+    final duration = _player.duration ?? Duration.zero;
+    final next = _player.position + offset;
+    if (next <= Duration.zero) {
+      await _player.seek(Duration.zero);
+      return;
+    }
+    if (duration > Duration.zero && next >= duration) {
+      await _player.seek(duration);
+      return;
+    }
+    await _player.seek(next);
+  }
+
+  String _formatDuration(Duration duration) {
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+    if (hours > 0) {
+      return '$hours:$minutes:$seconds';
+    }
+    return '$minutes:$seconds';
+  }
 }
 
+class _ErrorView extends StatelessWidget {
+  const _ErrorView({required this.error, required this.onRetry});
+
+  final Object? error;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('加载播放信息失败'),
+            const SizedBox(height: 8),
+            Text(
+              '$error',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: Colors.red),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton(onPressed: onRetry, child: const Text('重试')),
+          ],
+        ),
+      ),
+    );
+  }
+}

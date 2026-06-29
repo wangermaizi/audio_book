@@ -1,8 +1,9 @@
 import 'package:dio/dio.dart';
-import 'package:html/parser.dart' as html_parser;
 import 'package:html/dom.dart' as dom;
+import 'package:html/parser.dart' as html_parser;
 
 import 'package:audio_book/core/network/api_client.dart';
+import 'package:audio_book/core/network/site_config.dart';
 import 'package:audio_book/features/search/search_models.dart';
 
 class SearchApi {
@@ -10,83 +11,154 @@ class SearchApi {
 
   final ApiClient _client;
 
-  static const String _baseUrl = 'https://m.huanting.cc';
+  static const String _baseUrl = SiteConfig.baseUrl;
 
   Future<List<SearchResultItem>> search(String query) async {
-    final response = await _client.dio.get<String>(
-      '$_baseUrl/Ms.php',
-      queryParameters: {'q': query},
+    final apiResults = await _tryApiSearch(query);
+    if (apiResults.isNotEmpty) {
+      return apiResults;
+    }
+
+    final response = await _client.dio.post<String>(
+      '$_baseUrl/novelsearch/search/result.html',
+      data: {'searchword': query},
       options: Options(
         responseType: ResponseType.plain,
-        headers: const {
-          'User-Agent':
-              'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1',
-        },
+        contentType: Headers.formUrlEncodedContentType,
+        headers: {...SiteConfig.mobileHeaders, 'Referer': _baseUrl},
       ),
     );
 
-    final html = response.data ?? '';
-    final document = html_parser.parse(html);
-
-    return _parseResults(document);
+    return _parseHtmlResults(html_parser.parse(response.data ?? ''));
   }
 
-  List<SearchResultItem> _parseResults(dom.Document document) {
-    final cards = document.querySelectorAll('section.page-content .card');
-    final results = <SearchResultItem>[];
-
-    for (final card in cards) {
-      final link = card.querySelector('a.link');
-      if (link == null) {
-        continue;
-      }
-
-      final href = link.attributes['href'] ?? '';
-
-      final img = card.querySelector('.sumext-pic-con .pic img');
-      final coverUrl = img?.attributes['src'] ?? '';
-
-      final titleElement = card.querySelector('.sumext-pic-con .con .title');
-      final title = titleElement?.text.trim() ?? '';
-
-      final entElements = card.querySelectorAll('.sumext-pic-con .con .ent');
-      String announcer = '';
-      String category = '';
-      if (entElements.length >= 2) {
-        announcer = entElements[0].text.replaceFirst('播音：', '').trim();
-        category = entElements[1].text.replaceFirst('栏目：', '').trim();
-      } else {
-        for (final e in entElements) {
-          final text = e.text.trim();
-          if (text.startsWith('播音：')) {
-            announcer = text.replaceFirst('播音：', '').trim();
-          } else if (text.startsWith('栏目：')) {
-            category = text.replaceFirst('栏目：', '').trim();
-          }
-        }
-      }
-
-      final summary =
-          card.querySelector('.sumext-pic-con .con .summary')?.text.trim() ??
-              '';
-
-      if (title.isEmpty) {
-        continue;
-      }
-
-      results.add(
-        SearchResultItem(
-          title: title,
-          coverUrl: coverUrl,
-          link: _absoluteUrl(href),
-          announcer: announcer,
-          category: category,
-          summary: summary,
+  Future<List<SearchResultItem>> _tryApiSearch(String query) async {
+    try {
+      final response = await _client.dio.get<Object?>(
+        '$_baseUrl/api/ajax/solist',
+        queryParameters: {'word': query, 'type': 'name', 'page': 1, 'order': 1},
+        options: Options(
+          responseType: ResponseType.json,
+          headers: SiteConfig.mobileHeaders,
         ),
       );
+
+      final data = response.data;
+      if (data is Map) {
+        return _parseApiResults(Map<String, dynamic>.from(data));
+      }
+    } on DioException {
+      return const <SearchResultItem>[];
+    }
+
+    return const <SearchResultItem>[];
+  }
+
+  List<SearchResultItem> _parseApiResults(Map<String, dynamic> json) {
+    final data = json['data'];
+    if (data is! List) {
+      return const <SearchResultItem>[];
+    }
+
+    return data
+        .whereType<Map>()
+        .map((item) {
+          final novel = item['novel'];
+          final boyin = item['boyin'];
+          final novelMap = novel is Map ? novel : const <String, dynamic>{};
+          final boyinMap = boyin is Map ? boyin : const <String, dynamic>{};
+          final title = (novelMap['name'] ?? '').toString();
+          final href = (novelMap['url'] ?? '').toString();
+
+          return SearchResultItem(
+            title: title,
+            coverUrl: (novelMap['cover'] ?? '').toString(),
+            link: _absoluteUrl(href),
+            announcer: (boyinMap['name'] ?? '').toString(),
+            category: '',
+            summary: (novelMap['intro'] ?? '').toString(),
+          );
+        })
+        .where((item) => item.title.isNotEmpty)
+        .toList();
+  }
+
+  List<SearchResultItem> _parseHtmlResults(dom.Document document) {
+    final results = <SearchResultItem>[];
+    final seen = <String>{};
+
+    for (final card in document.querySelectorAll(
+      '.book-ol .book-li, .list-li, .pic_list, section.page-content .card',
+    )) {
+      final item = _parseHtmlCard(card);
+      if (item == null || !seen.add(item.link)) {
+        continue;
+      }
+      results.add(item);
     }
 
     return results;
+  }
+
+  SearchResultItem? _parseHtmlCard(dom.Element card) {
+    final link = card.querySelector('a[href*="/youshengxiaoshuo/"]');
+    final href = link?.attributes['href'] ?? '';
+    final img = card.querySelector('img');
+    final titleFromText = _cleanText(
+      card
+              .querySelector(
+                '.book-title a, .list-name, .module-slide-caption, .title',
+              )
+              ?.text ??
+          '',
+    );
+    final title = titleFromText.isNotEmpty
+        ? titleFromText
+        : _stripAudioBookSuffix(
+            img?.attributes['alt'] ?? link?.attributes['title'] ?? '',
+          );
+
+    if (href.isEmpty || title.isEmpty) {
+      return null;
+    }
+
+    final metas = card.querySelectorAll('.book-meta, .ent');
+    return SearchResultItem(
+      title: title,
+      coverUrl: _imageUrl(img) ?? '',
+      link: _absoluteUrl(href),
+      announcer: metas.length > 1
+          ? _cleanText(
+              metas[1].text,
+            ).replaceFirst(RegExp(r'^\u64ad\u97f3[:\uff1a]'), '')
+          : '',
+      category: _cleanText(
+        card.querySelector('.module-slide-author')?.text ?? '',
+      ),
+      summary: _cleanText(
+        card.querySelector('.book-desc, .summary, .text')?.text ?? '',
+      ),
+    );
+  }
+
+  String? _imageUrl(dom.Element? img) {
+    if (img == null) {
+      return null;
+    }
+    return img.attributes['data-original'] ?? img.attributes['src'];
+  }
+
+  String _stripAudioBookSuffix(String value) {
+    return _cleanText(
+      value,
+    ).replaceFirst(RegExp(r'\u6709\u58f0\u5c0f\u8bf4$'), '');
+  }
+
+  String _cleanText(String text) {
+    return text
+        .replaceAll('\u00a0', ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
   }
 
   String _absoluteUrl(String href) {
@@ -99,4 +171,3 @@ class SearchApi {
     return '$_baseUrl$href';
   }
 }
-

@@ -1,8 +1,9 @@
 import 'package:dio/dio.dart';
-import 'package:html/parser.dart' as html_parser;
 import 'package:html/dom.dart' as dom;
+import 'package:html/parser.dart' as html_parser;
 
 import 'package:audio_book/core/network/api_client.dart';
+import 'package:audio_book/core/network/site_config.dart';
 import 'package:audio_book/features/home/home_models.dart';
 
 class HomeApi {
@@ -10,113 +11,138 @@ class HomeApi {
 
   final ApiClient _client;
 
-  static const String _baseUrl = 'https://m.huanting.cc';
+  static const String _baseUrl = SiteConfig.baseUrl;
 
   Future<HomeData> fetchHome() async {
     final response = await _client.dio.get<String>(
       _baseUrl,
       options: Options(
         responseType: ResponseType.plain,
-        headers: const {
-          'User-Agent':
-              'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1',
-        },
+        headers: SiteConfig.mobileHeaders,
       ),
     );
 
-    final html = response.data ?? '';
-    final document = html_parser.parse(html);
-
-    final banners = _parseBanners(document);
-    final recommends = _parseRecommends(document);
-
+    final document = html_parser.parse(response.data ?? '');
     return HomeData(
-      banners: banners,
-      recommendBooks: recommends,
+      banners: _parseBanners(document),
+      recommendBooks: _parseRecommends(document),
     );
   }
 
   List<HomeBanner> _parseBanners(dom.Document document) {
-    final elements =
-        document.querySelectorAll('section.swiper-container .swiper-slide a');
+    final elements = document.querySelectorAll(
+      '.focusBox .pic a[href*="/youshengxiaoshuo/"], '
+      'section.swiper-container .swiper-slide a[href*="/youshengxiaoshuo/"]',
+    );
 
-    return elements.map((a) {
-      final href = a.attributes['href'] ?? '';
-      final title = a.attributes['title'] ?? '';
-      final img = a.querySelector('img');
-      final src = img?.attributes['src'] ?? '';
+    return elements
+        .map((a) {
+          final href = a.attributes['href'] ?? '';
+          final img = a.querySelector('img');
+          final titleFromAttr = _cleanText(a.attributes['title'] ?? '');
+          final title = titleFromAttr.isNotEmpty
+              ? titleFromAttr
+              : _stripAudioBookSuffix(img?.attributes['alt'] ?? '');
 
-      return HomeBanner(
-        title: title,
-        imageUrl: src,
-        link: _absoluteUrl(href),
-        bookId: _extractBookId(href),
-      );
-    }).toList();
+          return HomeBanner(
+            title: title,
+            imageUrl: _imageUrl(img) ?? '',
+            link: _absoluteUrl(href),
+            bookId: _extractBookId(href),
+          );
+        })
+        .where((item) => item.bookId.isNotEmpty)
+        .toList();
   }
 
   List<HomeRecommendBook> _parseRecommends(dom.Document document) {
+    final editorSection = document
+        .querySelectorAll('.list')
+        .where(
+          (section) =>
+              section
+                  .querySelector('.module-title-h')
+                  ?.text
+                  .contains('\u7f16\u8f91\u63a8\u8350') ??
+              false,
+        )
+        .firstOrNull;
+
+    final source = editorSection != null
+        ? editorSection.querySelectorAll('.list-li')
+        : document.querySelectorAll('.list-li, .module-slide-li');
+
     final result = <HomeRecommendBook>[];
-
-    final section = document
-        .querySelectorAll('section')
-        .firstWhere((e) => e.text.contains('有声小说推荐收听'),
-            orElse: () => dom.Element.tag('section'));
-
-    final header = section.querySelector('h2.cat_tit');
-    if (section.children.isEmpty || header == null) {
-      return result;
-    }
-
-    final parentChildren = section.children;
-    final startIndex = parentChildren.indexOf(header);
-    if (startIndex < 0) {
-      return result;
-    }
-
-    for (var i = startIndex + 1; i < parentChildren.length; i++) {
-      final node = parentChildren[i];
-      if (node.localName == 'h5') {
-        break;
+    final seen = <String>{};
+    for (final item in source) {
+      final book = _parseGridBook(item);
+      if (book == null || !seen.add(book.link)) {
+        continue;
       }
-      if (node.localName == 'a' && node.classes.contains('bookbox')) {
-        final book = _parseRecommendBook(node);
-        if (book != null) {
-          result.add(book);
-        }
+      result.add(book);
+      if (result.length >= 12) {
+        break;
       }
     }
 
     return result;
   }
 
-  HomeRecommendBook? _parseRecommendBook(dom.Element a) {
-    final href = a.attributes['href'] ?? '';
-
-    final img = a.querySelector('.bookimg img');
-    final cover =
-        img?.attributes['data-original'] ?? img?.attributes['src'] ?? '';
-
-    final title = a.querySelector('.bookinfo .bookname')?.text.trim() ?? '';
-    final author = a.querySelector('.bookinfo .author')?.text.trim() ?? '';
-    final category = a.querySelector('.bookinfo .cat')?.text.trim() ?? '';
-    final summary =
-        a.querySelector('.bookinfo .intro, .bookinfo p.intro')?.text.trim() ??
-            '';
-
-    if (title.isEmpty) {
+  HomeRecommendBook? _parseGridBook(dom.Element item) {
+    final link = item.querySelector('a[href*="/youshengxiaoshuo/"]');
+    if (link == null) {
       return null;
     }
 
+    final href = link.attributes['href'] ?? '';
+    final img = link.querySelector('img') ?? item.querySelector('img');
+    final titleFromText = _cleanText(
+      item.querySelector('.list-name, .module-slide-caption')?.text ?? '',
+    );
+    final title = titleFromText.isNotEmpty
+        ? titleFromText
+        : _stripAudioBookSuffix(
+            img?.attributes['alt'] ?? link.attributes['title'] ?? '',
+          );
+
+    if (href.isEmpty || title.isEmpty) {
+      return null;
+    }
+
+    final status = _cleanText(item.querySelector('.score')?.text ?? '');
+    final category = _cleanText(
+      item.querySelector('.module-slide-author')?.text ?? '',
+    );
+
     return HomeRecommendBook(
       title: title,
-      author: author,
+      author: status,
       category: category,
-      coverUrl: cover,
+      coverUrl: _imageUrl(img) ?? '',
       link: _absoluteUrl(href),
-      summary: summary,
+      summary: status,
       bookId: _extractBookId(href),
     );
+  }
+
+  String? _imageUrl(dom.Element? img) {
+    if (img == null) {
+      return null;
+    }
+    return img.attributes['data-original'] ?? img.attributes['src'];
+  }
+
+  String _stripAudioBookSuffix(String value) {
+    return _cleanText(
+      value,
+    ).replaceFirst(RegExp(r'\u6709\u58f0\u5c0f\u8bf4$'), '');
+  }
+
+  String _cleanText(String text) {
+    return text
+        .replaceAll('\u00a0', ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
   }
 
   String _absoluteUrl(String href) {
@@ -130,12 +156,7 @@ class HomeApi {
   }
 
   String _extractBookId(String href) {
-    final reg = RegExp(r'/book/(\d+)\.html');
-    final match = reg.firstMatch(href);
-    if (match != null && match.groupCount >= 1) {
-      return match.group(1) ?? '';
-    }
-    return '';
+    final match = RegExp(r'/youshengxiaoshuo/(\d+)/').firstMatch(href);
+    return match?.group(1) ?? '';
   }
 }
-

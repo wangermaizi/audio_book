@@ -3,6 +3,7 @@ import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 
 import 'package:audio_book/core/network/api_client.dart';
+import 'package:audio_book/core/network/site_config.dart';
 import 'package:audio_book/features/book_detail/book_detail_models.dart';
 
 class BookDetailApi {
@@ -10,125 +11,187 @@ class BookDetailApi {
 
   final ApiClient _client;
 
-  static const String _baseUrl = 'https://m.huanting.cc';
+  static const String _baseUrl = SiteConfig.baseUrl;
+  static const String _fullWidthColon = '\uff1a';
 
   Future<BookDetail> fetchDetail(String bookId) async {
     final response = await _client.dio.get<String>(
-      '$_baseUrl/book/$bookId.html',
+      '$_baseUrl/youshengxiaoshuo/$bookId/',
       options: Options(
         responseType: ResponseType.plain,
-        headers: const {
-          'User-Agent':
-              'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1',
-        },
+        headers: SiteConfig.mobileHeaders,
       ),
     );
 
-    final html = response.data ?? '';
-    final document = html_parser.parse(html);
+    final document = html_parser.parse(response.data ?? '');
 
-    final name =
-        document.querySelector('section.booksite .bookinfo .bookname')?.text
-                .trim() ??
-            '';
+    return BookDetail(
+      bookId: bookId,
+      name: _cleanText(document.querySelector('.book .book-title')?.text ?? ''),
+      coverUrl: _imageUrl(document.querySelector('.book .book-cover')) ?? '',
+      author: _parseInfo(document, '\u4f5c\u8005'),
+      announcer: _parseInfo(
+        document,
+        '\u64ad\u8bb2',
+        fallbackLabel: '\u4e3b\u64ad',
+      ),
+      category: _parseInfo(document, '\u7c7b\u578b'),
+      date: _parseDate(document),
+      introParagraphs: _parseIntro(document),
+      episodes: _parseEpisodes(document),
+      recommends: _parseRecommends(document),
+    );
+  }
 
-    final coverUrl =
-        document.querySelector('section.booksite .bookimg img')?.attributes['src'] ??
-            '';
-
-    final info = document.querySelector('section.booksite .bookinfo .info');
-    String author = '';
-    String announcer = '';
-    String category = '';
-    String date = '';
-    if (info != null) {
-      final divs = info.querySelectorAll('div');
-      for (final d in divs) {
-        final text = d.text.trim();
-        if (text.startsWith('作者：')) {
-          author = text.replaceFirst('作者：', '').trim();
-        } else if (text.startsWith('主播：')) {
-          announcer = text.replaceFirst('主播：', '').trim();
-        } else if (text.startsWith('类型：')) {
-          category = text.replaceFirst('类型：', '').trim();
-        } else if (text.startsWith('时间：')) {
-          date = text.replaceFirst('时间：', '').trim();
-        }
-      }
+  List<String> _parseIntro(dom.Document document) {
+    final intro = document.querySelector('.book-des#play, .book-des');
+    if (intro == null) {
+      return const <String>[];
     }
 
-    final introSection = document.querySelector('section.bookintro');
-    final introParagraphs = <String>[];
-    if (introSection != null) {
-      for (final p in introSection.querySelectorAll('p')) {
-        final t = p.text.trim();
-        if (t.isNotEmpty) {
-          introParagraphs.add(t);
-        }
-      }
+    final parts = intro.innerHtml
+        .split(RegExp(r'<br\s*/?>', caseSensitive: false))
+        .map((part) => _cleanText(html_parser.parseFragment(part).text ?? ''))
+        .where((part) => part.isNotEmpty)
+        .toList();
+
+    if (parts.isNotEmpty) {
+      return parts;
     }
 
-    final episodes = <BookEpisode>[];
-    final pressList = document.querySelector('ul.press');
-    if (pressList != null) {
-      for (final a in pressList.querySelectorAll('a')) {
-        final href = a.attributes['href'] ?? '';
-        final title = a.text.trim();
-        if (href.isEmpty || title.isEmpty) continue;
-        episodes.add(
-          BookEpisode(
-            title: title,
-            playUrl: _absoluteUrl(href),
-          ),
-        );
+    final text = _cleanText(intro.text);
+    return text.isEmpty ? const <String>[] : <String>[text];
+  }
+
+  List<BookEpisode> _parseEpisodes(dom.Document document) {
+    final result = <BookEpisode>[];
+    final seen = <String>{};
+
+    for (final a in document.querySelectorAll('.play-list a[href*="/play/"]')) {
+      final href = a.attributes['href'] ?? '';
+      final title = _episodeTitle(a);
+      if (href.isEmpty || title.isEmpty || !seen.add(href)) {
+        continue;
       }
+
+      result.add(BookEpisode(title: title, playUrl: _absoluteUrl(href)));
     }
 
+    return result;
+  }
+
+  List<BookRecommend> _parseRecommends(dom.Document document) {
     final recommends = <BookRecommend>[];
-    for (final item in document.querySelectorAll('section .pic_list')) {
-      final linkElement = item.querySelector('.img a');
-      final href = linkElement?.attributes['href'] ?? '';
-      final title =
-          item.querySelector('.info .tit a')?.text.trim() ?? '';
-      final img = item.querySelector('.img img');
-      final cover =
-          img?.attributes['data-original'] ?? img?.attributes['src'] ?? '';
-      final authorText =
-          item.querySelector('.info .author')?.text.trim() ?? '';
-      final announcerText =
-          item.querySelector('.info .announcer')?.text.trim() ?? '';
-      final summary =
-          item.querySelector('.info .text')?.text.trim() ?? '';
 
-      if (href.isEmpty || title.isEmpty) continue;
+    for (final item in document.querySelectorAll('.book-ol .book-li')) {
+      final href =
+          item
+              .querySelector('a[href*="/youshengxiaoshuo/"]')
+              ?.attributes['href'] ??
+          '';
+      final img = item.querySelector('img');
+      final titleFromLink = _cleanText(
+        item.querySelector('.book-title a')?.text ?? '',
+      );
+      final title = titleFromLink.isNotEmpty
+          ? titleFromLink
+          : _stripAudioBookSuffix(img?.attributes['alt'] ?? '');
 
-      final recommendBookId = _extractBookId(href);
+      if (href.isEmpty || title.isEmpty) {
+        continue;
+      }
 
+      final meta = item.querySelectorAll('.book-meta');
       recommends.add(
         BookRecommend(
-          bookId: recommendBookId,
+          bookId: _extractBookId(href),
           title: title,
-          coverUrl: cover,
+          coverUrl: _imageUrl(img) ?? '',
           link: _absoluteUrl(href),
-          author: authorText,
-          announcer: announcerText,
-          summary: summary,
+          author: meta.isNotEmpty ? _cleanText(meta.first.text) : '',
+          announcer: meta.length > 1 ? _cleanText(meta[1].text) : '',
+          summary: _cleanText(item.querySelector('.book-desc')?.text ?? ''),
         ),
       );
     }
 
-    return BookDetail(
-      bookId: bookId,
-      name: name,
-      coverUrl: coverUrl,
-      author: author,
-      announcer: announcer,
-      category: category,
-      date: date,
-      introParagraphs: introParagraphs,
-      episodes: episodes,
-      recommends: recommends,
+    return recommends;
+  }
+
+  String _parseInfo(
+    dom.Document document,
+    String label, {
+    String? fallbackLabel,
+  }) {
+    final labels = {label, ?fallbackLabel};
+    for (final item in document.querySelectorAll('.book .book-rand-a')) {
+      final text = _cleanText(item.text);
+      final separator = text.indexOf(_fullWidthColon);
+      if (separator <= 0) {
+        continue;
+      }
+
+      final itemLabel = text.substring(0, separator).trim();
+      if (labels.contains(itemLabel)) {
+        return text.substring(separator + 1).trim();
+      }
+    }
+    return '';
+  }
+
+  String _parseDate(dom.Document document) {
+    for (final item in document.querySelectorAll('.book .book-rand-a')) {
+      final match = RegExp(
+        r'\d{4}/\d{2}/\d{2}(?:\s+\d{2}:\d{2}:\d{2})?',
+      ).firstMatch(item.text);
+      if (match != null) {
+        return match.group(0) ?? '';
+      }
+    }
+    return '';
+  }
+
+  String _episodeTitle(dom.Element a) {
+    final clone = dom.Element.html(a.outerHtml);
+    for (final noise in clone.querySelectorAll('span, i')) {
+      noise.remove();
+    }
+
+    final visibleTitle = _cleanText(
+      clone.text
+          .replaceFirst(RegExp(r'^\d{2}-\d{2}'), '')
+          .replaceFirst(RegExp(r'^\d+\s*'), ''),
     );
+    if (visibleTitle.isNotEmpty) {
+      return visibleTitle;
+    }
+
+    final rawTitle = a.attributes['title'] ?? '';
+    return _cleanText(
+      rawTitle
+          .replaceFirst(RegExp(r'^.+?\u6709\u58f0\u5c0f\u8bf4\s*'), '')
+          .replaceFirst('\u5728\u7ebf\u6536\u542c', ''),
+    );
+  }
+
+  String? _imageUrl(dom.Element? img) {
+    if (img == null) {
+      return null;
+    }
+    return img.attributes['data-original'] ?? img.attributes['src'];
+  }
+
+  String _stripAudioBookSuffix(String value) {
+    return _cleanText(
+      value,
+    ).replaceFirst(RegExp(r'\u6709\u58f0\u5c0f\u8bf4$'), '');
+  }
+
+  String _cleanText(String text) {
+    return text
+        .replaceAll('\u00a0', ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
   }
 
   String _absoluteUrl(String href) {
@@ -142,12 +205,7 @@ class BookDetailApi {
   }
 
   String _extractBookId(String href) {
-    final reg = RegExp(r'/book/(\d+)\.html');
-    final match = reg.firstMatch(href);
-    if (match != null && match.groupCount >= 1) {
-      return match.group(1) ?? '';
-    }
-    return '';
+    final match = RegExp(r'/youshengxiaoshuo/(\d+)/').firstMatch(href);
+    return match?.group(1) ?? '';
   }
 }
-
