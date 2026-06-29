@@ -5,10 +5,7 @@ import 'package:audio_book/features/search/search_api.dart';
 import 'package:audio_book/features/search/search_models.dart';
 
 class SearchPage extends StatefulWidget {
-  const SearchPage({
-    super.key,
-    required this.query,
-  });
+  const SearchPage({super.key, required this.query});
 
   final String query;
 
@@ -29,9 +26,7 @@ class _SearchPageState extends State<SearchPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text('搜索：${widget.query}'),
-      ),
+      appBar: AppBar(title: Text('搜索：${widget.query}')),
       body: FutureBuilder<List<SearchResultItem>>(
         future: _future,
         builder: (context, snapshot) {
@@ -49,10 +44,9 @@ class _SearchPageState extends State<SearchPage> {
                     const SizedBox(height: 8),
                     Text(
                       '${snapshot.error}',
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodySmall
-                          ?.copyWith(color: Colors.red),
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: Colors.red),
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 16),
@@ -93,23 +87,17 @@ class _SearchPageState extends State<SearchPage> {
       child: Card(
         elevation: 2,
         clipBehavior: Clip.antiAlias,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         child: InkWell(
           onTap: () {
-            final reg = RegExp(r'/youshengxiaoshuo/(\d+)/|/book/(\d+)\.html');
-            final match = reg.firstMatch(item.link);
-            final bookId = match != null
-                ? (match.group(1) ?? match.group(2) ?? '')
-                : '';
-
+            final bookId = _extractBookId(item.link);
+            if (bookId.isEmpty) {
+              return;
+            }
             Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (_) => BookDetailPage(
-                  bookId: bookId,
-                  initialTitle: item.title,
-                ),
+                builder: (_) =>
+                    BookDetailPage(bookId: bookId, initialTitle: item.title),
               ),
             );
           },
@@ -119,15 +107,14 @@ class _SearchPageState extends State<SearchPage> {
               SizedBox(
                 width: 96,
                 height: 128,
-                child: Image.network(
-                  item.coverUrl,
-                  fit: BoxFit.cover,
-                ),
+                child: Image.network(item.coverUrl, fit: BoxFit.cover),
               ),
               Expanded(
                 child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -135,14 +122,13 @@ class _SearchPageState extends State<SearchPage> {
                         item.title,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.bold,
-                            ),
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.bold),
                       ),
                       const SizedBox(height: 4),
                       if (item.announcer.isNotEmpty)
                         Text(
-                          '播音：${item.announcer}',
+                          '演播：${item.announcer}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: Theme.of(context).textTheme.bodySmall,
@@ -151,10 +137,9 @@ class _SearchPageState extends State<SearchPage> {
                       if (item.category.isNotEmpty)
                         Text(
                           '栏目：${item.category}',
-                          style: Theme.of(context)
-                              .textTheme
-                              .bodySmall
-                              ?.copyWith(color: Colors.blue),
+                          style: Theme.of(
+                            context,
+                          ).textTheme.bodySmall?.copyWith(color: Colors.blue),
                         ),
                       const SizedBox(height: 6),
                       Text(
@@ -173,5 +158,10 @@ class _SearchPageState extends State<SearchPage> {
       ),
     );
   }
-}
 
+  String _extractBookId(String link) {
+    final reg = RegExp(r'/youshengxiaoshuo/(\d+)/|/book/(\d+)\.html');
+    final match = reg.firstMatch(link);
+    return match == null ? '' : (match.group(1) ?? match.group(2) ?? '');
+  }
+}

@@ -12,6 +12,7 @@ class SearchApi {
   final ApiClient _client;
 
   static const String _baseUrl = SiteConfig.baseUrl;
+  static const String _webBaseUrl = 'https://www.ting13.cc';
 
   Future<List<SearchResultItem>> search(String query) async {
     final apiResults = await _tryApiSearch(query);
@@ -20,12 +21,16 @@ class SearchApi {
     }
 
     final response = await _client.dio.post<String>(
-      '$_baseUrl/novelsearch/search/result.html',
+      '$_webBaseUrl/novelsearch/search/result.html',
       data: {'searchword': query},
       options: Options(
         responseType: ResponseType.plain,
         contentType: Headers.formUrlEncodedContentType,
-        headers: {...SiteConfig.mobileHeaders, 'Referer': _baseUrl},
+        headers: {
+          'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
+          'Referer': _webBaseUrl,
+        },
       ),
     );
 
@@ -88,7 +93,7 @@ class SearchApi {
     final seen = <String>{};
 
     for (final card in document.querySelectorAll(
-      '.book-ol .book-li, .list-li, .pic_list, section.page-content .card',
+      '.list-works > li, .book-ol .book-li, .list-li, .pic_list, section.page-content .card',
     )) {
       final item = _parseHtmlCard(card);
       if (item == null || !seen.add(item.link)) {
@@ -101,13 +106,18 @@ class SearchApi {
   }
 
   SearchResultItem? _parseHtmlCard(dom.Element card) {
-    final link = card.querySelector('a[href*="/youshengxiaoshuo/"]');
+    final link = card.querySelector(
+      '.list-book-dt a[href*="/youshengxiaoshuo/"], '
+      '.book-title a[href*="/youshengxiaoshuo/"], '
+      'a.thumb[href*="/youshengxiaoshuo/"], '
+      'a[href*="/youshengxiaoshuo/"]',
+    );
     final href = link?.attributes['href'] ?? '';
     final img = card.querySelector('img');
     final titleFromText = _cleanText(
       card
               .querySelector(
-                '.book-title a, .list-name, .module-slide-caption, .title',
+                '.list-book-dt a[href*="/youshengxiaoshuo/"], .book-title a, .list-name, .module-slide-caption, .title',
               )
               ?.text ??
           '',
@@ -127,18 +137,32 @@ class SearchApi {
       title: title,
       coverUrl: _imageUrl(img) ?? '',
       link: _absoluteUrl(href),
-      announcer: metas.length > 1
-          ? _cleanText(
-              metas[1].text,
-            ).replaceFirst(RegExp(r'^\u64ad\u97f3[:\uff1a]'), '')
-          : '',
+      announcer: _parseAnnouncer(card, metas),
       category: _cleanText(
-        card.querySelector('.module-slide-author')?.text ?? '',
+        card.querySelector('.module-slide-author, .ztlz')?.text ?? '',
       ),
       summary: _cleanText(
-        card.querySelector('.book-desc, .summary, .text')?.text ?? '',
+        card
+                .querySelector('.list-book-des, .book-desc, .summary, .text')
+                ?.text ??
+            '',
       ),
     );
+  }
+
+  String _parseAnnouncer(dom.Element card, List<dom.Element> metas) {
+    final boyin = _cleanText(
+      card.querySelector('.book-boyin')?.text ?? '',
+    ).replaceFirst(RegExp(r'^\u6f14\u64ad[:\uff1a]'), '');
+    if (boyin.isNotEmpty) {
+      return boyin;
+    }
+    if (metas.length > 1) {
+      return _cleanText(
+        metas[1].text,
+      ).replaceFirst(RegExp(r'^\u64ad\u97f3[:\uff1a]'), '');
+    }
+    return '';
   }
 
   String? _imageUrl(dom.Element? img) {
