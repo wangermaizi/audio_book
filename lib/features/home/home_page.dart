@@ -14,7 +14,7 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  late final Future<HomeData> _future;
+  late Future<HomeData> _future;
   final HomeApi _api = HomeApi();
 
   final TextEditingController _searchController = TextEditingController();
@@ -51,10 +51,9 @@ class _HomePageState extends State<HomePage> {
                       const SizedBox(height: 8),
                       Text(
                         '${snapshot.error}',
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodySmall
-                            ?.copyWith(color: Colors.red),
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.copyWith(color: Colors.red),
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 16),
@@ -88,7 +87,9 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   Padding(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 12),
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
                     child: _buildSearchBar(context),
                   ),
                   _buildBanner(context, data.banners),
@@ -99,16 +100,16 @@ class _HomePageState extends State<HomePage> {
                       onTap: _onRecommendTitleTap,
                       child: Text(
                         '有声小说推荐收听',
-                        style: Theme.of(context)
-                            .textTheme
-                            .titleLarge
-                            ?.copyWith(fontWeight: FontWeight.bold),
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
                   ),
                   const SizedBox(height: 8),
-                  ...data.recommendBooks
-                      .map((b) => _buildRecommendItem(context, b)),
+                  ...data.recommendBooks.map(
+                    (b) => _buildRecommendItem(context, b),
+                  ),
                 ],
               ),
             );
@@ -125,11 +126,11 @@ class _HomePageState extends State<HomePage> {
       onSubmitted: _onSearchSubmitted,
       decoration: InputDecoration(
         hintText: '搜索有声小说',
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(999),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 10,
         ),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(999)),
         suffixIcon: IconButton(
           icon: const Icon(Icons.search),
           onPressed: () => _onSearchSubmitted(_searchController.text),
@@ -143,11 +144,9 @@ class _HomePageState extends State<HomePage> {
     if (query.isEmpty) {
       return;
     }
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => SearchPage(query: query),
-      ),
-    );
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => SearchPage(query: query)));
   }
 
   void _onRecommendTitleTap() {
@@ -221,10 +220,7 @@ class _HomePageState extends State<HomePage> {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  Image.network(
-                    item.imageUrl,
-                    fit: BoxFit.cover,
-                  ),
+                  Image.network(item.imageUrl, fit: BoxFit.cover),
                   Container(
                     alignment: Alignment.bottomLeft,
                     padding: const EdgeInsets.all(8),
@@ -258,18 +254,13 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildRecommendItem(
-    BuildContext context,
-    HomeRecommendBook book,
-  ) {
+  Widget _buildRecommendItem(BuildContext context, HomeRecommendBook book) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Card(
         elevation: 2,
         clipBehavior: Clip.antiAlias,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         child: InkWell(
           onTap: () {
             if (book.bookId.isEmpty) return;
@@ -288,15 +279,14 @@ class _HomePageState extends State<HomePage> {
               SizedBox(
                 width: 96,
                 height: 128,
-                child: Image.network(
-                  book.coverUrl,
-                  fit: BoxFit.cover,
-                ),
+                child: Image.network(book.coverUrl, fit: BoxFit.cover),
               ),
               Expanded(
                 child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -304,9 +294,8 @@ class _HomePageState extends State<HomePage> {
                         book.title,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.bold,
-                            ),
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.bold),
                       ),
                       const SizedBox(height: 4),
                       Text(
@@ -318,10 +307,9 @@ class _HomePageState extends State<HomePage> {
                       const SizedBox(height: 4),
                       Text(
                         book.category,
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodySmall
-                            ?.copyWith(color: Colors.blue),
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.copyWith(color: Colors.blue),
                       ),
                       const SizedBox(height: 6),
                       Text(
@@ -341,4 +329,3 @@ class _HomePageState extends State<HomePage> {
     );
   }
 }
-

@@ -56,7 +56,7 @@ class _PlayerPageState extends State<PlayerPage> {
         Uri.parse(info.audioUrl),
         tag: MediaItem(
           id: info.featureKey,
-          title: info.title.isEmpty ? widget.title : info.title,
+          title: _displayTitle(info),
           album: info.bookName.isEmpty ? null : info.bookName,
           artUri: info.coverUrl.isEmpty ? null : Uri.tryParse(info.coverUrl),
         ),
@@ -109,7 +109,7 @@ class _PlayerPageState extends State<PlayerPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
+      appBar: AppBar(title: Text(_pageTitle())),
       body: FutureBuilder<PlayerInfo>(
         future: _future,
         builder: (context, snapshot) {
@@ -126,27 +126,19 @@ class _PlayerPageState extends State<PlayerPage> {
           }
 
           return ListView(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
             children: [
-              _buildHeader(context, info),
-              const SizedBox(height: 24),
+              _buildNowPlaying(context, info),
+              const SizedBox(height: 22),
               _buildControls(context),
               if (_playerError != null) ...[
-                const SizedBox(height: 12),
+                const SizedBox(height: 14),
                 Text(
                   _playerError!,
                   style: Theme.of(
                     context,
                   ).textTheme.bodySmall?.copyWith(color: Colors.red),
-                ),
-              ],
-              if (info.message.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                Text(
-                  info.message,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Colors.orange.shade800,
-                  ),
+                  textAlign: TextAlign.center,
                 ),
               ],
             ],
@@ -156,53 +148,69 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
-  Widget _buildHeader(BuildContext context, PlayerInfo info) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _buildNowPlaying(BuildContext context, PlayerInfo info) {
+    final title = _displayTitle(info);
+    final bookName = info.bookName.isEmpty ? '' : info.bookName;
+
+    return Column(
       children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: SizedBox(
-            width: 104,
-            height: 140,
-            child: info.coverUrl.isEmpty
-                ? Container(color: Colors.black12)
-                : Image.network(info.coverUrl, fit: BoxFit.cover),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                info.title.isEmpty ? widget.title : info.title,
-                style: Theme.of(
-                  context,
-                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-              ),
-              if (info.bookName.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Text(info.bookName),
+        AspectRatio(
+          aspectRatio: 1,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.12),
+                  blurRadius: 24,
+                  offset: const Offset(0, 16),
+                ),
               ],
-              const SizedBox(height: 8),
-              Text(
-                '接口状态：${info.status.isEmpty ? '已返回音频' : info.status}',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: info.coverUrl.isEmpty
+                  ? const Icon(Icons.graphic_eq, size: 96)
+                  : Image.network(info.coverUrl, fit: BoxFit.cover),
+            ),
           ),
         ),
+        const SizedBox(height: 22),
+        Text(
+          title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: Theme.of(
+            context,
+          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+        ),
+        if (bookName.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(
+            bookName,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
       ],
     );
   }
 
   Widget _buildControls(BuildContext context) {
-    return Card(
-      elevation: 1,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(18, 18, 18, 20),
         child: Column(
           children: [
             StreamBuilder<Duration>(
@@ -222,17 +230,25 @@ class _PlayerPageState extends State<PlayerPage> {
 
                     return Column(
                       children: [
-                        Slider(
-                          min: 0,
-                          max: max <= 0 ? 1 : max,
-                          value: max <= 0 ? 0 : value,
-                          onChanged: max <= 0
-                              ? null
-                              : (next) {
-                                  _player.seek(
-                                    Duration(milliseconds: next.round()),
-                                  );
-                                },
+                        SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            trackHeight: 5,
+                            thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 7,
+                            ),
+                          ),
+                          child: Slider(
+                            min: 0,
+                            max: max <= 0 ? 1 : max,
+                            value: max <= 0 ? 0 : value,
+                            onChanged: max <= 0
+                                ? null
+                                : (next) {
+                                    _player.seek(
+                                      Duration(milliseconds: next.round()),
+                                    );
+                                  },
+                          ),
                         ),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -247,18 +263,18 @@ class _PlayerPageState extends State<PlayerPage> {
                 );
               },
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 20),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                IconButton.filledTonal(
+                _RoundControlButton(
                   tooltip: '后退 15 秒',
+                  icon: Icons.replay_10,
                   onPressed: _audioReady
                       ? () => _seekRelative(const Duration(seconds: -15))
                       : null,
-                  icon: const Icon(Icons.replay_10),
                 ),
-                const SizedBox(width: 16),
+                const SizedBox(width: 24),
                 StreamBuilder<PlayerState>(
                   stream: _player.playerStateStream,
                   initialData: _player.playerState,
@@ -272,20 +288,21 @@ class _PlayerPageState extends State<PlayerPage> {
                     final completed = processing == ProcessingState.completed;
 
                     if (buffering) {
-                      return const SizedBox(
-                        width: 56,
-                        height: 56,
+                      return const SizedBox.square(
+                        dimension: 72,
                         child: Padding(
-                          padding: EdgeInsets.all(12),
+                          padding: EdgeInsets.all(18),
                           child: CircularProgressIndicator(strokeWidth: 3),
                         ),
                       );
                     }
 
-                    return IconButton.filled(
-                      tooltip: completed
-                          ? '重新播放'
-                          : (_player.playing ? '暂停' : '播放'),
+                    return FilledButton(
+                      style: FilledButton.styleFrom(
+                        shape: const CircleBorder(),
+                        fixedSize: const Size.square(72),
+                        padding: EdgeInsets.zero,
+                      ),
                       onPressed: _audioReady
                           ? () async {
                               if (completed) {
@@ -294,38 +311,38 @@ class _PlayerPageState extends State<PlayerPage> {
                               await _togglePlay();
                             }
                           : null,
-                      iconSize: 32,
-                      icon: Icon(
+                      child: Icon(
                         _player.playing && !completed
                             ? Icons.pause
                             : Icons.play_arrow,
+                        size: 40,
                       ),
                     );
                   },
                 ),
-                const SizedBox(width: 16),
-                IconButton.filledTonal(
+                const SizedBox(width: 24),
+                _RoundControlButton(
                   tooltip: '前进 15 秒',
+                  icon: Icons.forward_10,
                   onPressed: _audioReady
                       ? () => _seekRelative(const Duration(seconds: 15))
                       : null,
-                  icon: const Icon(Icons.forward_10),
                 ),
               ],
             ),
-            const SizedBox(height: 16),
-            SegmentedButton<double>(
-              segments: const [
-                ButtonSegment(value: 0.75, label: Text('0.75x')),
-                ButtonSegment(value: 1, label: Text('1x')),
-                ButtonSegment(value: 1.25, label: Text('1.25x')),
-                ButtonSegment(value: 1.5, label: Text('1.5x')),
-                ButtonSegment(value: 2, label: Text('2x')),
+            const SizedBox(height: 22),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final speed in const [0.75, 1.0, 1.25, 1.5, 2.0])
+                  ChoiceChip(
+                    label: Text(_speedLabel(speed)),
+                    selected: _speed == speed,
+                    onSelected: _audioReady ? (_) => _changeSpeed(speed) : null,
+                  ),
               ],
-              selected: {_speed},
-              onSelectionChanged: _audioReady
-                  ? (values) => _changeSpeed(values.first)
-                  : null,
             ),
           ],
         ),
@@ -347,6 +364,29 @@ class _PlayerPageState extends State<PlayerPage> {
     await _player.seek(next);
   }
 
+  String _pageTitle() {
+    final title = widget.title.trim();
+    if (title.isEmpty || RegExp(r'^-?\d+(?:[-_]\d+)*$').hasMatch(title)) {
+      return '正在播放';
+    }
+    return title;
+  }
+
+  String _displayTitle(PlayerInfo info) {
+    final apiTitle = info.title.trim();
+    if (apiTitle.isNotEmpty) {
+      return apiTitle;
+    }
+    return _pageTitle();
+  }
+
+  String _speedLabel(double speed) {
+    if (speed == speed.roundToDouble()) {
+      return '${speed.round()}x';
+    }
+    return '${speed}x';
+  }
+
   String _formatDuration(Duration duration) {
     final hours = duration.inHours;
     final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
@@ -355,6 +395,29 @@ class _PlayerPageState extends State<PlayerPage> {
       return '$hours:$minutes:$seconds';
     }
     return '$minutes:$seconds';
+  }
+}
+
+class _RoundControlButton extends StatelessWidget {
+  const _RoundControlButton({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton.filledTonal(
+      tooltip: tooltip,
+      iconSize: 28,
+      style: IconButton.styleFrom(fixedSize: const Size.square(52)),
+      onPressed: onPressed,
+      icon: Icon(icon),
+    );
   }
 }
 

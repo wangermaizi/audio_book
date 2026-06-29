@@ -5,11 +5,7 @@ import 'package:audio_book/features/book_detail/book_detail_models.dart';
 import 'package:audio_book/features/player/player_page.dart';
 
 class BookDetailPage extends StatefulWidget {
-  const BookDetailPage({
-    super.key,
-    required this.bookId,
-    this.initialTitle,
-  });
+  const BookDetailPage({super.key, required this.bookId, this.initialTitle});
 
   final String bookId;
   final String? initialTitle;
@@ -21,6 +17,7 @@ class BookDetailPage extends StatefulWidget {
 class _BookDetailPageState extends State<BookDetailPage> {
   late Future<BookDetail> _future;
   final BookDetailApi _api = BookDetailApi();
+  bool _episodesAscending = true;
 
   @override
   void initState() {
@@ -31,9 +28,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.initialTitle ?? '书籍详情'),
-      ),
+      appBar: AppBar(title: Text(widget.initialTitle ?? '书籍详情')),
       body: FutureBuilder<BookDetail>(
         future: _future,
         builder: (context, snapshot) {
@@ -51,10 +46,9 @@ class _BookDetailPageState extends State<BookDetailPage> {
                     const SizedBox(height: 8),
                     Text(
                       '${snapshot.error}',
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodySmall
-                          ?.copyWith(color: Colors.red),
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: Colors.red),
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 16),
@@ -102,10 +96,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
             child: SizedBox(
               width: 110,
               height: 150,
-              child: Image.network(
-                detail.coverUrl,
-                fit: BoxFit.cover,
-              ),
+              child: Image.network(detail.coverUrl, fit: BoxFit.cover),
             ),
           ),
           const SizedBox(width: 12),
@@ -117,34 +108,21 @@ class _BookDetailPageState extends State<BookDetailPage> {
                   detail.name,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleLarge
-                      ?.copyWith(fontWeight: FontWeight.bold),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 6),
-                if (detail.author.isNotEmpty)
-                  Text('作者：${detail.author}'),
-                if (detail.announcer.isNotEmpty)
-                  Text('主播：${detail.announcer}'),
-                if (detail.category.isNotEmpty)
-                  Text('类型：${detail.category}'),
-                if (detail.date.isNotEmpty)
-                  Text('时间：${detail.date}'),
+                if (detail.author.isNotEmpty) Text('作者：${detail.author}'),
+                if (detail.announcer.isNotEmpty) Text('主播：${detail.announcer}'),
+                if (detail.category.isNotEmpty) Text('类型：${detail.category}'),
+                if (detail.date.isNotEmpty) Text('时间：${detail.date}'),
                 const SizedBox(height: 12),
                 ElevatedButton.icon(
                   onPressed: () {
                     if (detail.episodes.isEmpty) return;
                     final first = detail.episodes.first;
-                    final featureKey = _extractFeatureKey(first.playUrl);
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => PlayerPage(
-                          featureKey: featureKey,
-                          title: first.title,
-                        ),
-                      ),
-                    );
+                    _openPlayer(context, first);
                   },
                   icon: const Icon(Icons.play_arrow),
                   label: const Text('立即收听'),
@@ -162,9 +140,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Card(
         elevation: 1,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Column(
@@ -172,10 +148,9 @@ class _BookDetailPageState extends State<BookDetailPage> {
             children: [
               Text(
                 '内容简介',
-                style: Theme.of(context)
-                    .textTheme
-                    .titleMedium
-                    ?.copyWith(fontWeight: FontWeight.bold),
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 8),
               if (detail.introParagraphs.isEmpty)
@@ -198,59 +173,92 @@ class _BookDetailPageState extends State<BookDetailPage> {
   }
 
   Widget _buildEpisodes(BuildContext context, BookDetail detail) {
+    final episodes = _episodesAscending
+        ? detail.episodes
+        : detail.episodes.reversed.toList();
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Card(
         elevation: 1,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                '作品目录',
-                style: Theme.of(context)
-                    .textTheme
-                    .titleMedium
-                    ?.copyWith(fontWeight: FontWeight.bold),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '作品目录',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  if (episodes.isNotEmpty)
+                    Text(
+                      '共 ${episodes.length} 集',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  const SizedBox(width: 8),
+                  if (episodes.isNotEmpty)
+                    TextButton.icon(
+                      onPressed: () {
+                        setState(() {
+                          _episodesAscending = !_episodesAscending;
+                        });
+                      },
+                      icon: Icon(
+                        _episodesAscending
+                            ? Icons.arrow_upward
+                            : Icons.arrow_downward,
+                        size: 16,
+                      ),
+                      label: Text(_episodesAscending ? '正序' : '倒序'),
+                    ),
+                ],
               ),
               const SizedBox(height: 8),
-              if (detail.episodes.isEmpty)
+              if (episodes.isEmpty)
                 const Text('暂无章节')
               else
                 ListView.builder(
                   shrinkWrap: true,
                   physics: const NeverScrollableScrollPhysics(),
-                  itemCount: detail.episodes.length,
+                  itemCount: episodes.length,
                   itemBuilder: (context, index) {
-                    final ep = detail.episodes[index];
+                    final episode = episodes[index];
                     return ListTile(
                       contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      leading: Text(
+                        '${index + 1}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                       title: Text(
-                        ep.title,
+                        episode.title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      onTap: () {
-                        final featureKey = _extractFeatureKey(ep.playUrl);
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => PlayerPage(
-                              featureKey: featureKey,
-                              title: ep.title,
-                            ),
-                          ),
-                        );
-                      },
+                      onTap: () => _openPlayer(context, episode),
                     );
                   },
                 ),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  void _openPlayer(BuildContext context, BookEpisode episode) {
+    final featureKey = _extractFeatureKey(episode.playUrl);
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) =>
+            PlayerPage(featureKey: featureKey, title: episode.title),
       ),
     );
   }
@@ -264,4 +272,3 @@ class _BookDetailPageState extends State<BookDetailPage> {
     return playUrl;
   }
 }
-

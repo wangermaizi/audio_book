@@ -5,7 +5,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiClient {
   ApiClient._internal() {
-    dio = Dio();
+    dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 12),
+        receiveTimeout: const Duration(seconds: 20),
+        sendTimeout: const Duration(seconds: 12),
+      ),
+    );
     _loadCookieFuture = _loadCookie();
 
     dio.interceptors.add(
@@ -202,7 +208,7 @@ class ApiClient {
         DateTime? expires;
         try {
           expires = HttpDate.parse(rawDate);
-        } on FormatException {
+        } on Exception {
           expires = null;
         }
         if (expires != null && expires.isBefore(DateTime.now().toUtc())) {

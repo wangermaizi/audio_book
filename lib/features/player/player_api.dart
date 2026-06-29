@@ -21,10 +21,11 @@ class PlayerApi {
     final html = await _fetchPlayableHtml(featureKey);
     final document = html_parser.parse(html);
 
-    final title =
-        document.querySelector('h1')?.text.trim() ??
-        _metaContent(document, 'og:title') ??
-        '';
+    final title = _parseTitle(
+      document.querySelector('h1')?.text.trim() ??
+          _metaContent(document, 'og:title') ??
+          '',
+    );
     final novelId = _metaContent(document, '_b');
     final chapterId = _metaContent(document, '_p');
     final chapterSort = _metaContent(document, '_d') ?? 'read';
@@ -64,9 +65,23 @@ class PlayerApi {
       coverUrl: coverUrl,
       audioUrl: audioUrl,
       status: status.toString(),
-      message: data['msg']?.toString() ?? '',
+      message: '',
       rawHtml: html,
     );
+  }
+
+  String _parseTitle(String value) {
+    final title = value
+        .replaceFirst(RegExp(r'在线收听$'), '')
+        .replaceFirst(RegExp(r'有声小说$'), '')
+        .trim();
+    if (title.isEmpty) {
+      return '';
+    }
+    if (RegExp(r'^-?\d+(?:[-_]\d+)*$').hasMatch(title)) {
+      return '';
+    }
+    return title;
   }
 
   Future<String> _fetchPlayableHtml(String featureKey) async {

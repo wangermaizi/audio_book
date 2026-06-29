@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
@@ -24,6 +26,7 @@ class BookDetailApi {
     );
 
     final document = html_parser.parse(response.data ?? '');
+    final episodes = await _parseAllEpisodes(document);
 
     return BookDetail(
       bookId: bookId,
@@ -38,9 +41,116 @@ class BookDetailApi {
       category: _parseInfo(document, '\u7c7b\u578b'),
       date: _parseDate(document),
       introParagraphs: _parseIntro(document),
-      episodes: _parseEpisodes(document),
+      episodes: episodes,
       recommends: _parseRecommends(document),
     );
+  }
+
+  Future<List<BookEpisode>> _parseAllEpisodes(dom.Document document) async {
+    final directoryHref = document
+        .querySelector('.play-list a.dirurl[href], a[href*="/tingdirs/"]')
+        ?.attributes['href'];
+    if (directoryHref == null || directoryHref.isEmpty) {
+      return _parseEpisodes(document, sortAscending: true);
+    }
+
+    final directoryDocument = await _fetchDirectoryDocument(
+      _absoluteUrl(directoryHref),
+    );
+    final episodes = directoryDocument == null
+        ? _parseEpisodes(document, sortAscending: true)
+        : _parseEpisodes(directoryDocument, sortAscending: true);
+
+    return episodes.isEmpty
+        ? _parseEpisodes(document, sortAscending: true)
+        : episodes;
+  }
+
+  Future<dom.Document?> _fetchDirectoryDocument(String url) async {
+    var response = await _client.dio.get<String>(
+      url,
+      options: Options(
+        responseType: ResponseType.plain,
+        headers: SiteConfig.mobileHeaders,
+      ),
+    );
+
+    final firstHtml = response.data ?? '';
+    if (await _applyScriptCookies(firstHtml)) {
+      response = await _client.dio.get<String>(
+        url,
+        options: Options(
+          responseType: ResponseType.plain,
+          headers: SiteConfig.mobileHeaders,
+        ),
+      );
+    }
+
+    final html = response.data ?? '';
+    if (!html.contains('/play/')) {
+      return null;
+    }
+    return html_parser.parse(html);
+  }
+
+  Future<bool> _applyScriptCookies(String html) async {
+    final script = _decodeCookieScript(html) ?? html;
+    var changed = false;
+
+    final token = _readJsString(script, 'token');
+    if (token != null) {
+      await _client.upsertCookie('__51guid__', token);
+      changed = true;
+    }
+
+    final refreshToken = _readJsString(script, 'refreshToken');
+    if (refreshToken != null) {
+      await _client.upsertCookie('__51refresh__guid', refreshToken);
+      changed = true;
+    }
+
+    final retry = RegExp(
+      r'var\s+retry\s*=\s*(\d+)',
+    ).firstMatch(script)?.group(1);
+    if (retry != null) {
+      await _client.upsertCookie('__51refresh__guid', retry);
+      changed = true;
+    }
+
+    final directCookiePattern = RegExp(
+      r"document\.cookie\s*=\s*'([^'=;]+)=([^';]*)",
+    );
+    for (final match in directCookiePattern.allMatches(script)) {
+      final name = match.group(1) ?? '';
+      final value = match.group(2) ?? '';
+      if (name.isNotEmpty && value.isNotEmpty) {
+        await _client.upsertCookie(name, value);
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
+  String? _decodeCookieScript(String html) {
+    final reversed = RegExp(
+      r'var\s+reversed\s*=\s*"([^"]+)"',
+    ).firstMatch(html)?.group(1);
+    if (reversed == null) {
+      return null;
+    }
+
+    try {
+      return utf8.decode(base64.decode(reversed.split('').reversed.join()));
+    } on FormatException {
+      return null;
+    }
+  }
+
+  String? _readJsString(String script, String name) {
+    return RegExp(
+      "var\\s+$name\\s*=\\s*'([^']*)'",
+    ).firstMatch(script)?.group(1);
   }
 
   List<String> _parseIntro(dom.Document document) {
@@ -63,7 +173,10 @@ class BookDetailApi {
     return text.isEmpty ? const <String>[] : <String>[text];
   }
 
-  List<BookEpisode> _parseEpisodes(dom.Document document) {
+  List<BookEpisode> _parseEpisodes(
+    dom.Document document, {
+    bool sortAscending = false,
+  }) {
     final result = <BookEpisode>[];
     final seen = <String>{};
 
@@ -77,6 +190,9 @@ class BookDetailApi {
       result.add(BookEpisode(title: title, playUrl: _absoluteUrl(href)));
     }
 
+    if (sortAscending) {
+      result.sort((a, b) => _episodeNumber(a).compareTo(_episodeNumber(b)));
+    }
     return result;
   }
 
@@ -152,26 +268,36 @@ class BookDetailApi {
   }
 
   String _episodeTitle(dom.Element a) {
+    final rawTitle = a.attributes['title'] ?? '';
+    final titleMatch = RegExp(
+      r'\s*(?:第\s*)?(\d+)\s*(?:集|章|回|期)',
+    ).firstMatch(rawTitle);
+    if (titleMatch != null) {
+      return '第${titleMatch.group(1)}集';
+    }
+
+    final href = a.attributes['href'] ?? '';
+    final hrefNumber = RegExp(r'_(\d+)_').firstMatch(href)?.group(1);
+    if (hrefNumber != null) {
+      return '第$hrefNumber集';
+    }
+
     final clone = dom.Element.html(a.outerHtml);
     for (final noise in clone.querySelectorAll('span, i')) {
       noise.remove();
     }
 
-    final visibleTitle = _cleanText(
-      clone.text
-          .replaceFirst(RegExp(r'^\d{2}-\d{2}'), '')
-          .replaceFirst(RegExp(r'^\d+\s*'), ''),
-    );
-    if (visibleTitle.isNotEmpty) {
-      return visibleTitle;
+    return _cleanText(clone.text);
+  }
+
+  int _episodeNumber(BookEpisode episode) {
+    final titleNumber = RegExp(r'\d+').firstMatch(episode.title)?.group(0);
+    if (titleNumber != null) {
+      return int.tryParse(titleNumber) ?? 0;
     }
 
-    final rawTitle = a.attributes['title'] ?? '';
-    return _cleanText(
-      rawTitle
-          .replaceFirst(RegExp(r'^.+?\u6709\u58f0\u5c0f\u8bf4\s*'), '')
-          .replaceFirst('\u5728\u7ebf\u6536\u542c', ''),
-    );
+    final urlNumber = RegExp(r'_(\d+)_').firstMatch(episode.playUrl)?.group(1);
+    return int.tryParse(urlNumber ?? '') ?? 0;
   }
 
   String? _imageUrl(dom.Element? img) {
