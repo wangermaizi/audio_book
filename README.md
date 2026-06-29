@@ -116,3 +116,9 @@ assets/branding/app_icon.png
 ## 开源说明
 
 项目代码可以开源学习和二次开发。由于本项目通过解析第三方网页实现功能，请自行确认目标站点内容版权、使用条款以及分发合规性。
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
+The MIT License applies only to this project's source code. Third-party website content, audio files, cover images, and related copyrighted materials remain owned by their respective rights holders.
