@@ -5,6 +5,7 @@ import 'package:audio_book/features/book_detail/book_detail_page.dart';
 import 'package:audio_book/features/home/home_api.dart';
 import 'package:audio_book/features/home/home_models.dart';
 import 'package:audio_book/features/search/search_page.dart';
+import 'package:audio_book/features/update/update_service.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -16,23 +17,53 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   late Future<HomeData> _future;
   final HomeApi _api = HomeApi();
+  final UpdateService _updateService = UpdateService();
 
   final TextEditingController _searchController = TextEditingController();
   final TextEditingController _cookieController = TextEditingController();
 
   int _titleTapCount = 0;
   DateTime? _lastTitleTapTime;
+  bool _checkingUpdate = false;
+  bool _autoUpdateChecked = false;
 
   @override
   void initState() {
     super.initState();
     _future = _api.fetchHome();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkForUpdate(silentWhenLatest: true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _cookieController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: null,
+      appBar: AppBar(
+        title: const Text('有声听书'),
+        actions: [
+          IconButton(
+            tooltip: '检查更新',
+            onPressed: _checkingUpdate
+                ? null
+                : () => _checkForUpdate(silentWhenLatest: false),
+            icon: _checkingUpdate
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.system_update_alt),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: FutureBuilder<HomeData>(
           future: _future,
@@ -340,6 +371,134 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
       ),
+    );
+  }
+
+  Future<void> _checkForUpdate({required bool silentWhenLatest}) async {
+    if (_checkingUpdate || (silentWhenLatest && _autoUpdateChecked)) {
+      return;
+    }
+
+    setState(() => _checkingUpdate = true);
+    try {
+      final update = await _updateService.checkForUpdate();
+      _autoUpdateChecked = true;
+      if (!mounted) {
+        return;
+      }
+      if (update == null) {
+        if (!silentWhenLatest) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('当前已是最新版本')));
+        }
+        return;
+      }
+      await _showUpdateDialog(update);
+    } catch (error) {
+      if (!mounted || silentWhenLatest) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('检查更新失败：$error')));
+    } finally {
+      if (mounted) {
+        setState(() => _checkingUpdate = false);
+      }
+    }
+  }
+
+  Future<void> _showUpdateDialog(UpdateInfo update) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('发现新版本 ${update.tagName}'),
+          content: Text(
+            update.body.trim().isEmpty ? '是否下载并安装最新版本？' : update.body.trim(),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('稍后'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _downloadAndInstall(update);
+              },
+              child: const Text('下载更新'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _downloadAndInstall(UpdateInfo update) async {
+    var progress = 0.0;
+    var installing = false;
+    var downloadStarted = false;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Future<void> startDownload() async {
+              try {
+                final apkPath = await _updateService.downloadApk(
+                  update,
+                  onReceiveProgress: (received, total) {
+                    if (total <= 0) {
+                      return;
+                    }
+                    setDialogState(() {
+                      progress = received / total;
+                    });
+                  },
+                );
+                setDialogState(() => installing = true);
+                await _updateService.installApk(apkPath);
+                if (dialogContext.mounted) {
+                  Navigator.of(dialogContext).pop();
+                }
+              } catch (error) {
+                if (dialogContext.mounted) {
+                  Navigator.of(dialogContext).pop();
+                }
+                if (mounted) {
+                  ScaffoldMessenger.of(
+                    this.context,
+                  ).showSnackBar(SnackBar(content: Text('下载或安装失败：$error')));
+                }
+              }
+            }
+
+            if (!downloadStarted) {
+              downloadStarted = true;
+              Future.microtask(startDownload);
+            }
+
+            final percent = (progress * 100).clamp(0, 100).toStringAsFixed(0);
+            return AlertDialog(
+              title: const Text('正在下载更新'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  LinearProgressIndicator(
+                    value: progress == 0 ? null : progress,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(installing ? '正在打开安装界面...' : '$percent%'),
+                ],
+              ),
+            );
+          },
+        );
+      },
     );
   }
 }
