@@ -411,10 +411,18 @@ class _BookDetailPageState extends State<BookDetailPage> {
 
   void _openPlayer(BuildContext context, BookEpisode episode) {
     final featureKey = _extractFeatureKey(episode.playUrl);
+    final playlist = List<BookEpisode>.unmodifiable(_episodes);
+    final currentIndex = playlist.indexWhere(
+      (item) => item.playUrl == episode.playUrl,
+    );
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) =>
-            PlayerPage(featureKey: featureKey, title: episode.title),
+        builder: (_) => PlayerPage(
+          featureKey: featureKey,
+          title: episode.title,
+          episodes: playlist,
+          initialIndex: currentIndex < 0 ? 0 : currentIndex,
+        ),
       ),
     );
   }

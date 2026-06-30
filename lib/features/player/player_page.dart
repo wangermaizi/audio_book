@@ -4,13 +4,22 @@ import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 
 import 'package:audio_book/core/logger/file_logger.dart';
+import 'package:audio_book/features/book_detail/book_detail_models.dart';
 import 'package:audio_book/features/player/player_api.dart';
 
 class PlayerPage extends StatefulWidget {
-  const PlayerPage({super.key, required this.featureKey, required this.title});
+  const PlayerPage({
+    super.key,
+    required this.featureKey,
+    required this.title,
+    this.episodes = const <BookEpisode>[],
+    this.initialIndex = 0,
+  });
 
   final String featureKey;
   final String title;
+  final List<BookEpisode> episodes;
+  final int initialIndex;
 
   @override
   State<PlayerPage> createState() => _PlayerPageState();
@@ -24,12 +33,25 @@ class _PlayerPageState extends State<PlayerPage> {
   PlayerInfo? _info;
   double _speed = 1;
   bool _audioReady = false;
+  bool _playAfterLoad = false;
   String? _playerError;
+  late int _currentIndex;
+  late String _currentFeatureKey;
+  late String _currentTitle;
 
   @override
   void initState() {
     super.initState();
     _player = AudioPlayer();
+    _currentIndex = _normalizedInitialIndex();
+    if (widget.episodes.isEmpty) {
+      _currentFeatureKey = widget.featureKey;
+      _currentTitle = widget.title;
+    } else {
+      final episode = widget.episodes[_currentIndex];
+      _currentFeatureKey = _extractFeatureKey(episode.playUrl);
+      _currentTitle = episode.title;
+    }
     _future = _load();
   }
 
@@ -48,8 +70,11 @@ class _PlayerPageState extends State<PlayerPage> {
     final session = await AudioSession.instance;
     await session.configure(const AudioSessionConfiguration.speech());
 
-    final info = await _api.fetchPlayInfo(widget.featureKey);
-    FileLogger().logPlayHtml(featureKey: widget.featureKey, html: info.rawHtml);
+    final info = await _api.fetchPlayInfo(_currentFeatureKey);
+    FileLogger().logPlayHtml(
+      featureKey: _currentFeatureKey,
+      html: info.rawHtml,
+    );
 
     await _player.setAudioSource(
       AudioSource.uri(
@@ -69,6 +94,11 @@ class _PlayerPageState extends State<PlayerPage> {
         _info = info;
         _audioReady = true;
       });
+    }
+
+    if (_playAfterLoad) {
+      _playAfterLoad = false;
+      await _player.play();
     }
 
     return info;
@@ -131,6 +161,10 @@ class _PlayerPageState extends State<PlayerPage> {
               _buildNowPlaying(context, info),
               const SizedBox(height: 22),
               _buildControls(context),
+              if (widget.episodes.isNotEmpty) ...[
+                const SizedBox(height: 18),
+                _buildPlaylist(context),
+              ],
               if (_playerError != null) ...[
                 const SizedBox(height: 14),
                 Text(
@@ -268,11 +302,9 @@ class _PlayerPageState extends State<PlayerPage> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 _RoundControlButton(
-                  tooltip: '后退 15 秒',
-                  icon: Icons.replay_10,
-                  onPressed: _audioReady
-                      ? () => _seekRelative(const Duration(seconds: -15))
-                      : null,
+                  tooltip: '上一集',
+                  icon: Icons.skip_previous,
+                  onPressed: _canPlayPrevious ? _playPrevious : null,
                 ),
                 const SizedBox(width: 24),
                 StreamBuilder<PlayerState>(
@@ -322,11 +354,30 @@ class _PlayerPageState extends State<PlayerPage> {
                 ),
                 const SizedBox(width: 24),
                 _RoundControlButton(
-                  tooltip: '前进 15 秒',
-                  icon: Icons.forward_10,
+                  tooltip: '下一集',
+                  icon: Icons.skip_next,
+                  onPressed: _canPlayNext ? _playNext : null,
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                TextButton.icon(
+                  onPressed: _audioReady
+                      ? () => _seekRelative(const Duration(seconds: -15))
+                      : null,
+                  icon: const Icon(Icons.replay_10),
+                  label: const Text('后退 15 秒'),
+                ),
+                const SizedBox(width: 8),
+                TextButton.icon(
                   onPressed: _audioReady
                       ? () => _seekRelative(const Duration(seconds: 15))
                       : null,
+                  icon: const Icon(Icons.forward_10),
+                  label: const Text('前进 15 秒'),
                 ),
               ],
             ),
@@ -350,6 +401,85 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
+  Widget _buildPlaylist(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.queue_music,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '播放列表',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  '${_currentIndex + 1}/${widget.episodes.length}',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: widget.episodes.length,
+              separatorBuilder: (context, index) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final episode = widget.episodes[index];
+                final selected = index == _currentIndex;
+                return ListTile(
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  leading: SizedBox(
+                    width: 34,
+                    child: selected
+                        ? Icon(
+                            Icons.volume_up,
+                            color: Theme.of(context).colorScheme.primary,
+                            size: 20,
+                          )
+                        : Text(
+                            '${index + 1}',
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                  ),
+                  title: Text(
+                    episode.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: selected
+                        ? TextStyle(
+                            color: Theme.of(context).colorScheme.primary,
+                            fontWeight: FontWeight.w700,
+                          )
+                        : null,
+                  ),
+                  onTap: selected ? null : () => _playEpisodeAt(index),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _seekRelative(Duration offset) async {
     final duration = _player.duration ?? Duration.zero;
     final next = _player.position + offset;
@@ -364,8 +494,64 @@ class _PlayerPageState extends State<PlayerPage> {
     await _player.seek(next);
   }
 
+  bool get _canPlayPrevious =>
+      widget.episodes.isNotEmpty && _currentIndex > 0 && _audioReady;
+
+  bool get _canPlayNext =>
+      widget.episodes.isNotEmpty &&
+      _currentIndex < widget.episodes.length - 1 &&
+      _audioReady;
+
+  Future<void> _playPrevious() async {
+    if (!_canPlayPrevious) {
+      return;
+    }
+    await _playEpisodeAt(_currentIndex - 1);
+  }
+
+  Future<void> _playNext() async {
+    if (!_canPlayNext) {
+      return;
+    }
+    await _playEpisodeAt(_currentIndex + 1);
+  }
+
+  Future<void> _playEpisodeAt(int index) async {
+    if (index < 0 ||
+        index >= widget.episodes.length ||
+        index == _currentIndex) {
+      return;
+    }
+
+    final episode = widget.episodes[index];
+    await _player.stop();
+    _playAfterLoad = true;
+    setState(() {
+      _currentIndex = index;
+      _currentFeatureKey = _extractFeatureKey(episode.playUrl);
+      _currentTitle = episode.title;
+      _info = null;
+      _audioReady = false;
+      _playerError = null;
+      _future = _load();
+    });
+  }
+
+  int _normalizedInitialIndex() {
+    if (widget.episodes.isEmpty) {
+      return 0;
+    }
+    if (widget.initialIndex < 0) {
+      return 0;
+    }
+    if (widget.initialIndex >= widget.episodes.length) {
+      return widget.episodes.length - 1;
+    }
+    return widget.initialIndex;
+  }
+
   String _pageTitle() {
-    final title = widget.title.trim();
+    final title = _currentTitle.trim();
     if (title.isEmpty || RegExp(r'^-?\d+(?:[-_]\d+)*$').hasMatch(title)) {
       return '正在播放';
     }
@@ -395,6 +581,15 @@ class _PlayerPageState extends State<PlayerPage> {
       return '$hours:$minutes:$seconds';
     }
     return '$minutes:$seconds';
+  }
+
+  String _extractFeatureKey(String playUrl) {
+    final reg = RegExp(r'/play/([^/]+)\.html|/ting/([^/]+)\.html');
+    final match = reg.firstMatch(playUrl);
+    if (match != null) {
+      return match.group(1) ?? match.group(2) ?? '';
+    }
+    return playUrl;
   }
 }
 
