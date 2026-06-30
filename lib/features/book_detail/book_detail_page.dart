@@ -17,12 +17,27 @@ class BookDetailPage extends StatefulWidget {
 class _BookDetailPageState extends State<BookDetailPage> {
   late Future<BookDetail> _future;
   final BookDetailApi _api = BookDetailApi();
+  final ScrollController _scrollController = ScrollController();
+
+  final List<BookEpisode> _episodes = <BookEpisode>[];
+  final Set<int> _loadedDirectoryPages = <int>{1};
+  List<DirectoryPageLink> _directoryPageLinks = <DirectoryPageLink>[];
   bool _episodesAscending = true;
+  bool _loadingMoreEpisodes = false;
 
   @override
   void initState() {
     super.initState();
     _future = _api.fetchDetail(widget.bookId);
+    _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollController
+      ..removeListener(_onScroll)
+      ..dispose();
+    super.dispose();
   }
 
   @override
@@ -36,33 +51,18 @@ class _BookDetailPageState extends State<BookDetailPage> {
             return const Center(child: CircularProgressIndicator());
           }
           if (snapshot.hasError) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('加载书籍详情失败'),
-                    const SizedBox(height: 8),
-                    Text(
-                      '${snapshot.error}',
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: Colors.red),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: () {
-                        setState(() {
-                          _future = _api.fetchDetail(widget.bookId);
-                        });
-                      },
-                      child: const Text('重试'),
-                    ),
-                  ],
-                ),
-              ),
+            return _ErrorView(
+              error: snapshot.error,
+              onRetry: () {
+                setState(() {
+                  _episodes.clear();
+                  _directoryPageLinks = <DirectoryPageLink>[];
+                  _loadedDirectoryPages
+                    ..clear()
+                    ..add(1);
+                  _future = _api.fetchDetail(widget.bookId);
+                });
+              },
             );
           }
 
@@ -70,14 +70,17 @@ class _BookDetailPageState extends State<BookDetailPage> {
           if (detail == null) {
             return const Center(child: Text('没有数据'));
           }
+          _syncEpisodes(detail);
 
           return ListView(
+            controller: _scrollController,
+            padding: const EdgeInsets.only(bottom: 24),
             children: [
               _buildHeader(context, detail),
               const SizedBox(height: 12),
               _buildIntro(context, detail),
               const SizedBox(height: 12),
-              _buildEpisodes(context, detail),
+              _buildEpisodes(context),
             ],
           );
         },
@@ -120,9 +123,8 @@ class _BookDetailPageState extends State<BookDetailPage> {
                 const SizedBox(height: 12),
                 ElevatedButton.icon(
                   onPressed: () {
-                    if (detail.episodes.isEmpty) return;
-                    final first = detail.episodes.first;
-                    _openPlayer(context, first);
+                    if (_episodes.isEmpty) return;
+                    _openPlayer(context, _episodes.first);
                   },
                   icon: const Icon(Icons.play_arrow),
                   label: const Text('立即收听'),
@@ -172,10 +174,11 @@ class _BookDetailPageState extends State<BookDetailPage> {
     );
   }
 
-  Widget _buildEpisodes(BuildContext context, BookDetail detail) {
+  Widget _buildEpisodes(BuildContext context) {
     final episodes = _episodesAscending
-        ? detail.episodes
-        : detail.episodes.reversed.toList();
+        ? _episodes
+        : _episodes.reversed.toList();
+    final canLoadMore = _nextDirectoryPageLink != null;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -199,10 +202,23 @@ class _BookDetailPageState extends State<BookDetailPage> {
                   ),
                   if (episodes.isNotEmpty)
                     Text(
-                      '共 ${episodes.length} 集',
+                      '已加载 ${episodes.length} 集',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
-                  const SizedBox(width: 8),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  if (_directoryPageLinks.isNotEmpty)
+                    OutlinedButton.icon(
+                      onPressed: _loadingMoreEpisodes
+                          ? null
+                          : _showDirectoryPagePicker,
+                      icon: const Icon(Icons.view_list, size: 18),
+                      label: const Text('选集范围'),
+                    ),
+                  const Spacer(),
                   if (episodes.isNotEmpty)
                     TextButton.icon(
                       onPressed: () {
@@ -233,9 +249,13 @@ class _BookDetailPageState extends State<BookDetailPage> {
                     return ListTile(
                       contentPadding: EdgeInsets.zero,
                       dense: true,
-                      leading: Text(
-                        '${index + 1}',
-                        style: Theme.of(context).textTheme.bodySmall,
+                      leading: SizedBox(
+                        width: 36,
+                        child: Text(
+                          '${index + 1}',
+                          style: Theme.of(context).textTheme.bodySmall,
+                          textAlign: TextAlign.center,
+                        ),
                       ),
                       title: Text(
                         episode.title,
@@ -246,11 +266,147 @@ class _BookDetailPageState extends State<BookDetailPage> {
                     );
                   },
                 ),
+              if (canLoadMore || _loadingMoreEpisodes) ...[
+                const SizedBox(height: 8),
+                Center(
+                  child: OutlinedButton.icon(
+                    onPressed: _loadingMoreEpisodes ? null : _loadNextPage,
+                    icon: _loadingMoreEpisodes
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.expand_more),
+                    label: Text(_loadingMoreEpisodes ? '加载中...' : '加载更多章节'),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
       ),
     );
+  }
+
+  void _syncEpisodes(BookDetail detail) {
+    if (_episodes.isNotEmpty) {
+      return;
+    }
+    _episodes.addAll(detail.episodes);
+    _directoryPageLinks = detail.directoryPageLinks;
+  }
+
+  void _onScroll() {
+    if (_loadingMoreEpisodes || _nextDirectoryPageLink == null) {
+      return;
+    }
+    if (!_scrollController.hasClients) {
+      return;
+    }
+
+    final position = _scrollController.position;
+    if (position.extentAfter < 500) {
+      _loadNextPage();
+    }
+  }
+
+  Future<void> _loadNextPage() async {
+    final link = _nextDirectoryPageLink;
+    if (link == null) {
+      return;
+    }
+    await _loadDirectoryPage(link);
+  }
+
+  Future<void> _loadDirectoryPage(DirectoryPageLink link) async {
+    if (_loadingMoreEpisodes ||
+        _loadedDirectoryPages.contains(link.pageNumber)) {
+      return;
+    }
+
+    setState(() => _loadingMoreEpisodes = true);
+    try {
+      final data = await _api.fetchDirectoryPageData(link.url);
+      final nextEpisodes = data.episodes;
+      final seen = _episodes.map((episode) => episode.playUrl).toSet();
+      setState(() {
+        for (final episode in nextEpisodes) {
+          if (seen.add(episode.playUrl)) {
+            _episodes.add(episode);
+          }
+        }
+        _episodes.sort(
+          (a, b) => _episodeNumber(a).compareTo(_episodeNumber(b)),
+        );
+        _loadedDirectoryPages.add(link.pageNumber);
+        _mergeDirectoryPageLinks(data.pageLinks);
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _loadingMoreEpisodes = false);
+      }
+    }
+  }
+
+  Future<void> _showDirectoryPagePicker() async {
+    final selected = await showModalBottomSheet<DirectoryPageLink>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        final links = _directoryPageLinks.toList()
+          ..sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+
+        return SafeArea(
+          child: ListView.separated(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            itemCount: links.length,
+            separatorBuilder: (context, index) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final link = links[index];
+              final loaded = _loadedDirectoryPages.contains(link.pageNumber);
+              return ListTile(
+                leading: Icon(
+                  loaded ? Icons.check_circle : Icons.radio_button_unchecked,
+                ),
+                title: Text('第 ${link.label} 集'),
+                subtitle: Text(loaded ? '已加载' : '点击加载这个范围'),
+                onTap: loaded
+                    ? () => Navigator.of(context).pop()
+                    : () => Navigator.of(context).pop(link),
+              );
+            },
+          ),
+        );
+      },
+    );
+
+    if (selected != null) {
+      await _loadDirectoryPage(selected);
+    }
+  }
+
+  DirectoryPageLink? get _nextDirectoryPageLink {
+    final links = _directoryPageLinks.toList()
+      ..sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+    for (final link in links) {
+      if (!_loadedDirectoryPages.contains(link.pageNumber)) {
+        return link;
+      }
+    }
+    return null;
+  }
+
+  void _mergeDirectoryPageLinks(List<DirectoryPageLink> links) {
+    final byPage = <int, DirectoryPageLink>{
+      for (final link in _directoryPageLinks) link.pageNumber: link,
+    };
+    for (final link in links) {
+      byPage[link.pageNumber] = link;
+    }
+    _directoryPageLinks = byPage.values.toList()
+      ..sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
   }
 
   void _openPlayer(BuildContext context, BookEpisode episode) {
@@ -263,6 +419,11 @@ class _BookDetailPageState extends State<BookDetailPage> {
     );
   }
 
+  int _episodeNumber(BookEpisode episode) {
+    final titleNumber = RegExp(r'\d+').firstMatch(episode.title)?.group(0);
+    return int.tryParse(titleNumber ?? '') ?? 0;
+  }
+
   String _extractFeatureKey(String playUrl) {
     final reg = RegExp(r'/play/([^/]+)\.html|/ting/([^/]+)\.html');
     final match = reg.firstMatch(playUrl);
@@ -270,5 +431,37 @@ class _BookDetailPageState extends State<BookDetailPage> {
       return match.group(1) ?? match.group(2) ?? '';
     }
     return playUrl;
+  }
+}
+
+class _ErrorView extends StatelessWidget {
+  const _ErrorView({required this.error, required this.onRetry});
+
+  final Object? error;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('加载书籍详情失败'),
+            const SizedBox(height: 8),
+            Text(
+              '$error',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: Colors.red),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton(onPressed: onRetry, child: const Text('重试')),
+          ],
+        ),
+      ),
+    );
   }
 }

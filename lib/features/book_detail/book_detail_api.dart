@@ -26,7 +26,7 @@ class BookDetailApi {
     );
 
     final document = html_parser.parse(response.data ?? '');
-    final episodes = await _parseAllEpisodes(document);
+    final directory = await _parseDirectory(document);
 
     return BookDetail(
       bookId: bookId,
@@ -41,56 +41,121 @@ class BookDetailApi {
       category: _parseInfo(document, '\u7c7b\u578b'),
       date: _parseDate(document),
       introParagraphs: _parseIntro(document),
-      episodes: episodes,
+      episodes: directory.episodes,
+      directoryPageLinks: directory.pageLinks,
       recommends: _parseRecommends(document),
     );
   }
 
-  Future<List<BookEpisode>> _parseAllEpisodes(dom.Document document) async {
-    final directoryHref = document
-        .querySelector('.play-list a.dirurl[href], a[href*="/tingdirs/"]')
-        ?.attributes['href'];
-    if (directoryHref == null || directoryHref.isEmpty) {
-      return _parseEpisodes(document, sortAscending: true);
-    }
-
-    final directoryDocument = await _fetchDirectoryDocument(
-      _absoluteUrl(directoryHref),
-    );
-    final episodes = directoryDocument == null
-        ? _parseEpisodes(document, sortAscending: true)
-        : _parseEpisodes(directoryDocument, sortAscending: true);
-
-    return episodes.isEmpty
-        ? _parseEpisodes(document, sortAscending: true)
-        : episodes;
+  Future<List<BookEpisode>> fetchDirectoryPage(String url) async {
+    final data = await fetchDirectoryPageData(url);
+    return data.episodes;
   }
 
-  Future<dom.Document?> _fetchDirectoryDocument(String url) async {
-    var response = await _client.dio.get<String>(
-      url,
-      options: Options(
-        responseType: ResponseType.plain,
-        headers: SiteConfig.mobileHeaders,
-      ),
+  Future<DirectoryPageData> fetchDirectoryPageData(String url) async {
+    final document = await _fetchDirectoryDocument(url);
+    if (document == null) {
+      return const DirectoryPageData(
+        episodes: <BookEpisode>[],
+        pageLinks: <DirectoryPageLink>[],
+      );
+    }
+    return DirectoryPageData(
+      episodes: _parseEpisodes(document, sortAscending: true),
+      pageLinks: _parseDirectoryPageLinks(document),
     );
+  }
 
-    final firstHtml = response.data ?? '';
-    if (await _applyScriptCookies(firstHtml)) {
-      response = await _client.dio.get<String>(
-        url,
-        options: Options(
-          responseType: ResponseType.plain,
-          headers: SiteConfig.mobileHeaders,
-        ),
+  Future<_DirectoryData> _parseDirectory(dom.Document document) async {
+    final directoryHref = _findDirectoryHref(document);
+    if (directoryHref == null || directoryHref.isEmpty) {
+      return _DirectoryData(
+        episodes: _parseEpisodes(document, sortAscending: true),
+        pageLinks: const <DirectoryPageLink>[],
       );
     }
 
-    final html = response.data ?? '';
-    if (!html.contains('/play/')) {
-      return null;
+    final directoryUrl = _absoluteUrl(directoryHref);
+    final firstDocument = await _fetchDirectoryDocument(directoryUrl);
+    if (firstDocument == null) {
+      return _DirectoryData(
+        episodes: const <BookEpisode>[],
+        pageLinks: <DirectoryPageLink>[
+          DirectoryPageLink(pageNumber: 1, label: '1-60', url: directoryUrl),
+        ],
+      );
     }
-    return html_parser.parse(html);
+
+    final episodes = _parseEpisodes(firstDocument, sortAscending: true);
+    return _DirectoryData(
+      episodes: episodes,
+      pageLinks: _sortDirectoryPageLinks(<DirectoryPageLink>[
+        DirectoryPageLink(
+          pageNumber: 1,
+          label: _episodeRangeLabel(episodes, fallbackPageNumber: 1),
+          url: directoryUrl,
+        ),
+        ..._parseDirectoryPageLinks(firstDocument),
+      ]),
+    );
+  }
+
+  List<DirectoryPageLink> _parseDirectoryPageLinks(dom.Document document) {
+    final pageLinks = <String, DirectoryPageLink>{};
+    for (final a in document.querySelectorAll(
+      '.pages a[href*="/tingdirs/"], .pagelist a[href*="/tingdirs/"], '
+      '.page a[href*="/tingdirs/"], .chapter-list-block a[href*="/tingdirs/"], '
+      'a[href*="/tingdirs/"][href*="page="]',
+    )) {
+      final href = a.attributes['href'] ?? '';
+      if (href.isEmpty) {
+        continue;
+      }
+      final url = _absoluteUrl(href);
+      if (url.startsWith(_baseUrl)) {
+        final pageNumber = _pageNumber(url);
+        pageLinks[url] = DirectoryPageLink(
+          pageNumber: pageNumber,
+          label: _directoryPageLabel(a, pageNumber),
+          url: url,
+        );
+      }
+    }
+    return pageLinks.values.toList();
+  }
+
+  Future<dom.Document?> _fetchDirectoryDocument(String url) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      Response<String> response;
+      try {
+        response = await _client.dio.get<String>(
+          url,
+          options: Options(
+            responseType: ResponseType.plain,
+            headers: <String, String>{
+              ...SiteConfig.mobileHeaders,
+              'Referer': '$_baseUrl/',
+            },
+            validateStatus: (status) => status != null && status < 500,
+          ),
+        );
+      } on DioException {
+        return null;
+      }
+      if (response.statusCode == 429) {
+        return null;
+      }
+
+      final html = response.data ?? '';
+      if (html.contains('/play/')) {
+        return html_parser.parse(html);
+      }
+
+      if (!await _applyScriptCookies(html)) {
+        return null;
+      }
+    }
+    return null;
   }
 
   Future<bool> _applyScriptCookies(String html) async {
@@ -99,7 +164,7 @@ class BookDetailApi {
 
     final token = _readJsString(script, 'token');
     if (token != null) {
-      await _client.upsertCookie('__51guid__', token);
+      await _client.upsertCookie('__51guid__', Uri.encodeComponent(token));
       changed = true;
     }
 
@@ -173,6 +238,25 @@ class BookDetailApi {
     return text.isEmpty ? const <String>[] : <String>[text];
   }
 
+  String? _findDirectoryHref(dom.Document document) {
+    for (final a in document.querySelectorAll('a[href*="/tingdirs/"]')) {
+      final href = a.attributes['href'] ?? '';
+      if (href.isEmpty) {
+        continue;
+      }
+
+      final text = _cleanText(a.text);
+      final className = a.attributes['class'] ?? '';
+      if (text.contains('\u5168\u90e8\u7ae0\u8282') ||
+          text.contains('\u66f4\u591a\u7ae0\u8282') ||
+          className.split(RegExp(r'\s+')).contains('dirurl')) {
+        return href;
+      }
+    }
+
+    return document.querySelector('a[href*="/tingdirs/"]')?.attributes['href'];
+  }
+
   List<BookEpisode> _parseEpisodes(
     dom.Document document, {
     bool sortAscending = false,
@@ -180,7 +264,9 @@ class BookDetailApi {
     final result = <BookEpisode>[];
     final seen = <String>{};
 
-    for (final a in document.querySelectorAll('.play-list a[href*="/play/"]')) {
+    for (final a in document.querySelectorAll(
+      '.play-list li a[href*="/play/"], .chapter-list li a[href*="/play/"]',
+    )) {
       final href = a.attributes['href'] ?? '';
       final title = _episodeTitle(a);
       if (href.isEmpty || title.isEmpty || !seen.add(href)) {
@@ -270,16 +356,16 @@ class BookDetailApi {
   String _episodeTitle(dom.Element a) {
     final rawTitle = a.attributes['title'] ?? '';
     final titleMatch = RegExp(
-      r'\s*(?:第\s*)?(\d+)\s*(?:集|章|回|期)',
+      r'\s*(?:\u7b2c\s*)?(\d+)\s*(?:\u96c6|\u7ae0|\u56de|\u671f)',
     ).firstMatch(rawTitle);
     if (titleMatch != null) {
-      return '第${titleMatch.group(1)}集';
+      return '\u7b2c${titleMatch.group(1)}\u96c6';
     }
 
     final href = a.attributes['href'] ?? '';
     final hrefNumber = RegExp(r'_(\d+)_').firstMatch(href)?.group(1);
     if (hrefNumber != null) {
-      return '第$hrefNumber集';
+      return '\u7b2c$hrefNumber\u96c6';
     }
 
     final clone = dom.Element.html(a.outerHtml);
@@ -334,4 +420,62 @@ class BookDetailApi {
     final match = RegExp(r'/youshengxiaoshuo/(\d+)/').firstMatch(href);
     return match?.group(1) ?? '';
   }
+
+  List<DirectoryPageLink> _sortDirectoryPageLinks(
+    Iterable<DirectoryPageLink> links,
+  ) {
+    final uniqueByPage = <int, DirectoryPageLink>{};
+    for (final link in links) {
+      uniqueByPage[link.pageNumber] = link;
+    }
+    final unique = uniqueByPage.values.toList();
+    unique.sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+    return unique;
+  }
+
+  String _directoryPageLabel(dom.Element a, int pageNumber) {
+    final text = _cleanText(a.text).replaceAll('~', '-');
+    final range = RegExp(r'\d+\s*[-\u2013\u2014]\s*\d+').firstMatch(text);
+    if (range != null) {
+      return range.group(0)!.replaceAll(RegExp(r'\s+'), '');
+    }
+    final start = (pageNumber - 1) * 60 + 1;
+    final end = pageNumber * 60;
+    return '$start-$end';
+  }
+
+  String _episodeRangeLabel(
+    List<BookEpisode> episodes, {
+    required int fallbackPageNumber,
+  }) {
+    final numbers = episodes.map(_episodeNumber).where((n) => n > 0).toList()
+      ..sort();
+    if (numbers.isNotEmpty) {
+      return '${numbers.first}-${numbers.last}';
+    }
+    final start = (fallbackPageNumber - 1) * 60 + 1;
+    final end = fallbackPageNumber * 60;
+    return '$start-$end';
+  }
+
+  int _pageNumber(String url) {
+    return int.tryParse(
+          RegExp(r'[?&]page=(\d+)').firstMatch(url)?.group(1) ?? '',
+        ) ??
+        1;
+  }
+}
+
+class _DirectoryData {
+  const _DirectoryData({required this.episodes, required this.pageLinks});
+
+  final List<BookEpisode> episodes;
+  final List<DirectoryPageLink> pageLinks;
+}
+
+class DirectoryPageData {
+  const DirectoryPageData({required this.episodes, required this.pageLinks});
+
+  final List<BookEpisode> episodes;
+  final List<DirectoryPageLink> pageLinks;
 }

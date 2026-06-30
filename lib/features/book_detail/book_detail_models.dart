@@ -1,11 +1,20 @@
 class BookEpisode {
-  BookEpisode({
-    required this.title,
-    required this.playUrl,
-  });
+  BookEpisode({required this.title, required this.playUrl});
 
   final String title;
   final String playUrl;
+}
+
+class DirectoryPageLink {
+  const DirectoryPageLink({
+    required this.pageNumber,
+    required this.label,
+    required this.url,
+  });
+
+  final int pageNumber;
+  final String label;
+  final String url;
 }
 
 class BookRecommend {
@@ -39,6 +48,7 @@ class BookDetail {
     required this.date,
     required this.introParagraphs,
     required this.episodes,
+    required this.directoryPageLinks,
     required this.recommends,
   });
 
@@ -51,6 +61,6 @@ class BookDetail {
   final String date;
   final List<String> introParagraphs;
   final List<BookEpisode> episodes;
+  final List<DirectoryPageLink> directoryPageLinks;
   final List<BookRecommend> recommends;
 }
-
