@@ -4,6 +4,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 
 import 'package:audio_book/core/logger/file_logger.dart';
+import 'package:audio_book/features/book_detail/book_detail_api.dart';
 import 'package:audio_book/features/book_detail/book_detail_models.dart';
 import 'package:audio_book/features/player/player_api.dart';
 
@@ -13,12 +14,16 @@ class PlayerPage extends StatefulWidget {
     required this.featureKey,
     required this.title,
     this.episodes = const <BookEpisode>[],
+    this.directoryPageLinks = const <DirectoryPageLink>[],
+    this.loadedDirectoryPages = const <int>{},
     this.initialIndex = 0,
   });
 
   final String featureKey;
   final String title;
   final List<BookEpisode> episodes;
+  final List<DirectoryPageLink> directoryPageLinks;
+  final Set<int> loadedDirectoryPages;
   final int initialIndex;
 
   @override
@@ -29,26 +34,38 @@ class _PlayerPageState extends State<PlayerPage> {
   late Future<PlayerInfo> _future;
   late final AudioPlayer _player;
   final PlayerApi _api = PlayerApi();
+  final BookDetailApi _bookDetailApi = BookDetailApi();
 
   PlayerInfo? _info;
   double _speed = 1;
   bool _audioReady = false;
   bool _playAfterLoad = false;
+  bool _loadingEpisodes = false;
+  String? _loginSheetShownForFeatureKey;
   String? _playerError;
   late int _currentIndex;
   late String _currentFeatureKey;
   late String _currentTitle;
+  late final List<BookEpisode> _episodes;
+  late final Set<int> _loadedDirectoryPages;
+  late List<DirectoryPageLink> _directoryPageLinks;
 
   @override
   void initState() {
     super.initState();
     _player = AudioPlayer();
+    _episodes = List<BookEpisode>.of(widget.episodes);
+    _directoryPageLinks = List<DirectoryPageLink>.of(widget.directoryPageLinks)
+      ..sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+    _loadedDirectoryPages = widget.loadedDirectoryPages.isEmpty
+        ? <int>{if (_episodes.isNotEmpty) 1}
+        : Set<int>.of(widget.loadedDirectoryPages);
     _currentIndex = _normalizedInitialIndex();
-    if (widget.episodes.isEmpty) {
+    if (_episodes.isEmpty) {
       _currentFeatureKey = widget.featureKey;
       _currentTitle = widget.title;
     } else {
-      final episode = widget.episodes[_currentIndex];
+      final episode = _episodes[_currentIndex];
       _currentFeatureKey = _extractFeatureKey(episode.playUrl);
       _currentTitle = episode.title;
     }
@@ -114,6 +131,21 @@ class _PlayerPageState extends State<PlayerPage> {
     });
   }
 
+  Future<void> _showLoginSheet() async {
+    if (!mounted) {
+      return;
+    }
+    final loggedIn = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => _LoginSheet(api: _api),
+    );
+    if (loggedIn == true) {
+      await _retry();
+    }
+  }
+
   Future<void> _togglePlay() async {
     if (!_audioReady) {
       return;
@@ -147,7 +179,22 @@ class _PlayerPageState extends State<PlayerPage> {
             return const Center(child: CircularProgressIndicator());
           }
           if (snapshot.hasError) {
-            return _ErrorView(error: snapshot.error, onRetry: _retry);
+            if (snapshot.error is LoginRequiredException &&
+                _loginSheetShownForFeatureKey != _currentFeatureKey) {
+              _loginSheetShownForFeatureKey = _currentFeatureKey;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) {
+                  _showLoginSheet();
+                }
+              });
+            }
+            return _ErrorView(
+              error: snapshot.error,
+              onRetry: _retry,
+              onLogin: snapshot.error is LoginRequiredException
+                  ? _showLoginSheet
+                  : null,
+            );
           }
 
           final info = snapshot.data ?? _info;
@@ -161,7 +208,7 @@ class _PlayerPageState extends State<PlayerPage> {
               _buildNowPlaying(context, info),
               const SizedBox(height: 22),
               _buildControls(context),
-              if (widget.episodes.isNotEmpty) ...[
+              if (_episodes.isNotEmpty) ...[
                 const SizedBox(height: 18),
                 _buildPlaylist(context),
               ],
@@ -428,19 +475,45 @@ class _PlayerPageState extends State<PlayerPage> {
                 ),
                 const Spacer(),
                 Text(
-                  '${_currentIndex + 1}/${widget.episodes.length}',
+                  '${_currentIndex + 1}/${_episodes.length}',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],
             ),
+            if (_directoryPageLinks.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _loadingEpisodes
+                        ? null
+                        : _showDirectoryPagePicker,
+                    icon: const Icon(Icons.view_list, size: 18),
+                    label: const Text('选集范围'),
+                  ),
+                  const Spacer(),
+                  if (_loadingEpisodes)
+                    const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  else if (_nextDirectoryPageLink != null)
+                    TextButton.icon(
+                      onPressed: _loadNextDirectoryPage,
+                      icon: const Icon(Icons.expand_more, size: 18),
+                      label: const Text('加载更多'),
+                    ),
+                ],
+              ),
+            ],
             const SizedBox(height: 8),
             ListView.separated(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              itemCount: widget.episodes.length,
+              itemCount: _episodes.length,
               separatorBuilder: (context, index) => const Divider(height: 1),
               itemBuilder: (context, index) {
-                final episode = widget.episodes[index];
+                final episode = _episodes[index];
                 final selected = index == _currentIndex;
                 return ListTile(
                   dense: true,
@@ -495,11 +568,11 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   bool get _canPlayPrevious =>
-      widget.episodes.isNotEmpty && _currentIndex > 0 && _audioReady;
+      _episodes.isNotEmpty && _currentIndex > 0 && _audioReady;
 
   bool get _canPlayNext =>
-      widget.episodes.isNotEmpty &&
-      _currentIndex < widget.episodes.length - 1 &&
+      _episodes.isNotEmpty &&
+      _currentIndex < _episodes.length - 1 &&
       _audioReady;
 
   Future<void> _playPrevious() async {
@@ -517,19 +590,18 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   Future<void> _playEpisodeAt(int index) async {
-    if (index < 0 ||
-        index >= widget.episodes.length ||
-        index == _currentIndex) {
+    if (index < 0 || index >= _episodes.length || index == _currentIndex) {
       return;
     }
 
-    final episode = widget.episodes[index];
+    final episode = _episodes[index];
     await _player.stop();
     _playAfterLoad = true;
     setState(() {
       _currentIndex = index;
       _currentFeatureKey = _extractFeatureKey(episode.playUrl);
       _currentTitle = episode.title;
+      _loginSheetShownForFeatureKey = null;
       _info = null;
       _audioReady = false;
       _playerError = null;
@@ -538,16 +610,153 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   int _normalizedInitialIndex() {
-    if (widget.episodes.isEmpty) {
+    if (_episodes.isEmpty) {
       return 0;
     }
     if (widget.initialIndex < 0) {
       return 0;
     }
-    if (widget.initialIndex >= widget.episodes.length) {
-      return widget.episodes.length - 1;
+    if (widget.initialIndex >= _episodes.length) {
+      return _episodes.length - 1;
     }
     return widget.initialIndex;
+  }
+
+  Future<void> _loadNextDirectoryPage() async {
+    final link = _nextDirectoryPageLink;
+    if (link == null) {
+      return;
+    }
+    await _loadDirectoryPage(link);
+  }
+
+  Future<void> _loadDirectoryPage(DirectoryPageLink link) async {
+    if (_loadingEpisodes || _loadedDirectoryPages.contains(link.pageNumber)) {
+      return;
+    }
+
+    setState(() => _loadingEpisodes = true);
+    try {
+      final currentPlayUrl = _currentEpisodePlayUrl;
+      final data = await _bookDetailApi.fetchDirectoryPageData(link.url);
+      final seen = _episodes.map((episode) => episode.playUrl).toSet();
+
+      setState(() {
+        for (final episode in data.episodes) {
+          if (seen.add(episode.playUrl)) {
+            _episodes.add(episode);
+          }
+        }
+        _episodes.sort(
+          (a, b) => _episodeNumber(a).compareTo(_episodeNumber(b)),
+        );
+        _loadedDirectoryPages.add(link.pageNumber);
+        _mergeDirectoryPageLinks(data.pageLinks);
+        _syncCurrentIndex(currentPlayUrl);
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('加载章节失败：$error')));
+    } finally {
+      if (mounted) {
+        setState(() => _loadingEpisodes = false);
+      }
+    }
+  }
+
+  Future<void> _showDirectoryPagePicker() async {
+    final selected = await showModalBottomSheet<DirectoryPageLink>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        final links = _directoryPageLinks.toList()
+          ..sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+
+        return SafeArea(
+          child: ListView.separated(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            itemCount: links.length,
+            separatorBuilder: (context, index) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final link = links[index];
+              final loaded = _loadedDirectoryPages.contains(link.pageNumber);
+              return ListTile(
+                leading: Icon(
+                  loaded ? Icons.check_circle : Icons.radio_button_unchecked,
+                ),
+                title: Text('第 ${link.label} 集'),
+                subtitle: Text(loaded ? '已加载' : '点击加载这个范围'),
+                onTap: loaded
+                    ? () => Navigator.of(context).pop()
+                    : () => Navigator.of(context).pop(link),
+              );
+            },
+          ),
+        );
+      },
+    );
+
+    if (selected != null) {
+      await _loadDirectoryPage(selected);
+    }
+  }
+
+  DirectoryPageLink? get _nextDirectoryPageLink {
+    final links = _directoryPageLinks.toList()
+      ..sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+    for (final link in links) {
+      if (!_loadedDirectoryPages.contains(link.pageNumber)) {
+        return link;
+      }
+    }
+    return null;
+  }
+
+  String get _currentEpisodePlayUrl {
+    if (_episodes.isEmpty ||
+        _currentIndex < 0 ||
+        _currentIndex >= _episodes.length) {
+      return '';
+    }
+    return _episodes[_currentIndex].playUrl;
+  }
+
+  void _mergeDirectoryPageLinks(List<DirectoryPageLink> links) {
+    final byPage = <int, DirectoryPageLink>{
+      for (final link in _directoryPageLinks) link.pageNumber: link,
+    };
+    for (final link in links) {
+      byPage[link.pageNumber] = link;
+    }
+    _directoryPageLinks = byPage.values.toList()
+      ..sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+  }
+
+  void _syncCurrentIndex(String currentPlayUrl) {
+    if (currentPlayUrl.isEmpty) {
+      return;
+    }
+    final nextIndex = _episodes.indexWhere(
+      (episode) => episode.playUrl == currentPlayUrl,
+    );
+    if (nextIndex >= 0) {
+      _currentIndex = nextIndex;
+    }
+  }
+
+  int _episodeNumber(BookEpisode episode) {
+    final titleNumber = RegExp(r'\d+').firstMatch(episode.title)?.group(0);
+    if (titleNumber != null) {
+      return int.tryParse(titleNumber) ?? 0;
+    }
+
+    final urlNumber = RegExp(r'_(\d+)_').firstMatch(episode.playUrl)?.group(1);
+    return int.tryParse(urlNumber ?? '') ?? 0;
   }
 
   String _pageTitle() {
@@ -617,10 +826,11 @@ class _RoundControlButton extends StatelessWidget {
 }
 
 class _ErrorView extends StatelessWidget {
-  const _ErrorView({required this.error, required this.onRetry});
+  const _ErrorView({required this.error, required this.onRetry, this.onLogin});
 
   final Object? error;
   final VoidCallback onRetry;
+  final VoidCallback? onLogin;
 
   @override
   Widget build(BuildContext context) {
@@ -640,10 +850,289 @@ class _ErrorView extends StatelessWidget {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 16),
-            ElevatedButton(onPressed: onRetry, child: const Text('重试')),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                if (onLogin != null)
+                  FilledButton.icon(
+                    onPressed: onLogin,
+                    icon: const Icon(Icons.login),
+                    label: const Text('打开登录'),
+                  ),
+                OutlinedButton(onPressed: onRetry, child: const Text('重试')),
+              ],
+            ),
           ],
         ),
       ),
     );
+  }
+}
+
+class _LoginSheet extends StatefulWidget {
+  const _LoginSheet({required this.api});
+
+  final PlayerApi api;
+
+  @override
+  State<_LoginSheet> createState() => _LoginSheetState();
+}
+
+class _LoginSheetState extends State<_LoginSheet> {
+  final TextEditingController _usernameController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _confirmPasswordController =
+      TextEditingController();
+  final TextEditingController _codeController = TextEditingController();
+  bool _submitting = false;
+  bool _sendingCode = false;
+  bool _registerMode = false;
+  String? _message;
+
+  @override
+  void dispose() {
+    _usernameController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    _codeController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.viewInsetsOf(context).bottom;
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(20, 8, 20, bottom + 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _registerMode ? '邮箱注册' : '站点登录',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _submitting || _sendingCode
+                      ? null
+                      : () {
+                          setState(() {
+                            _registerMode = !_registerMode;
+                            _message = null;
+                          });
+                        },
+                  child: Text(_registerMode ? '去登录' : '去注册'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _registerMode ? '注册 13听书网 邮箱账号后会自动重试播放。' : '这一集需要登录 13听书网 后继续收听。',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _usernameController,
+              textInputAction: TextInputAction.next,
+              decoration: const InputDecoration(
+                labelText: '账号或邮箱',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _passwordController,
+              obscureText: true,
+              onSubmitted: (_) => _submit(),
+              decoration: const InputDecoration(
+                labelText: '密码',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            if (_registerMode) ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: _confirmPasswordController,
+                obscureText: true,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: '确认密码',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _codeController,
+                      keyboardType: TextInputType.number,
+                      onSubmitted: (_) => _submit(),
+                      decoration: const InputDecoration(
+                        labelText: '邮箱验证码',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    height: 56,
+                    child: OutlinedButton(
+                      onPressed: _sendingCode || _submitting
+                          ? null
+                          : _sendRegisterCode,
+                      child: _sendingCode
+                          ? const SizedBox.square(
+                              dimension: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('获取'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+            if (_message != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                _message!,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: Colors.red),
+              ),
+            ],
+            const SizedBox(height: 16),
+            FilledButton(
+              onPressed: _submitting ? null : _submit,
+              child: _submitting
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Text(_registerMode ? '注册并重试' : '登录'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _submit() async {
+    final username = _usernameController.text.trim();
+    final password = _passwordController.text;
+    if (username.isEmpty || password.isEmpty) {
+      setState(() => _message = _registerMode ? '请输入邮箱和密码' : '请输入账号和密码');
+      return;
+    }
+    if (_registerMode) {
+      final confirmPassword = _confirmPasswordController.text;
+      final code = _codeController.text.trim();
+      if (password != confirmPassword) {
+        setState(() => _message = '两次输入的密码不一致');
+        return;
+      }
+      if (code.isEmpty) {
+        setState(() => _message = '请输入邮箱验证码');
+        return;
+      }
+      await _register(username, password, code);
+      return;
+    }
+
+    setState(() {
+      _submitting = true;
+      _message = null;
+    });
+    try {
+      final result = await widget.api.login(
+        username: username,
+        password: password,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (result.success) {
+        Navigator.of(context).pop(true);
+        return;
+      }
+      setState(() => _message = result.message);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _message = '$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _submitting = false);
+      }
+    }
+  }
+
+  Future<void> _sendRegisterCode() async {
+    final email = _usernameController.text.trim();
+    if (email.isEmpty) {
+      setState(() => _message = '请输入邮箱');
+      return;
+    }
+
+    setState(() {
+      _sendingCode = true;
+      _message = null;
+    });
+    try {
+      final result = await widget.api.sendRegisterCode(email: email);
+      if (mounted) {
+        setState(() => _message = result.message);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _message = '$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sendingCode = false);
+      }
+    }
+  }
+
+  Future<void> _register(String email, String password, String code) async {
+    setState(() {
+      _submitting = true;
+      _message = null;
+    });
+    try {
+      final result = await widget.api.registerByEmail(
+        email: email,
+        password: password,
+        code: code,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (result.success) {
+        Navigator.of(context).pop(true);
+        return;
+      }
+      setState(() => _message = result.message);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _message = '$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _submitting = false);
+      }
+    }
   }
 }

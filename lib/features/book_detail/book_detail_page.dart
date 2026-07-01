@@ -421,6 +421,10 @@ class _BookDetailPageState extends State<BookDetailPage> {
           featureKey: featureKey,
           title: episode.title,
           episodes: playlist,
+          directoryPageLinks: List<DirectoryPageLink>.unmodifiable(
+            _directoryPageLinks,
+          ),
+          loadedDirectoryPages: Set<int>.unmodifiable(_loadedDirectoryPages),
           initialIndex: currentIndex < 0 ? 0 : currentIndex,
         ),
       ),

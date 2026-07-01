@@ -50,7 +50,11 @@ class PlayerApi {
 
     final status = _readStatus(data['status']);
     if (status != 200) {
-      throw StateError(data['msg']?.toString() ?? '音频接口返回异常');
+      final message = data['msg']?.toString() ?? '音频接口返回异常';
+      if (status == 406 || data['loginurl'] != null) {
+        throw LoginRequiredException(message);
+      }
+      throw StateError(message);
     }
 
     final audioUrl = (data['audioUrl'] ?? '').toString().trim();
@@ -86,35 +90,28 @@ class PlayerApi {
 
   Future<String> _fetchPlayableHtml(String featureKey) async {
     final url = '$_baseUrl/play/$featureKey.html';
-    final response = await _client.dio.get<String>(
-      url,
-      options: Options(
-        responseType: ResponseType.plain,
-        headers: {...SiteConfig.mobileHeaders, 'Referer': _baseUrl},
-      ),
-    );
 
-    final html = response.data ?? '';
-    if (!_isChallengeHtml(html)) {
-      return html;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final response = await _client.dio.get<String>(
+        url,
+        options: Options(
+          responseType: ResponseType.plain,
+          headers: {...SiteConfig.mobileHeaders, 'Referer': '$_baseUrl/'},
+          validateStatus: (status) => status != null && status < 500,
+        ),
+      );
+
+      final html = response.data ?? '';
+      if (!_isChallengeHtml(html)) {
+        return html;
+      }
+
+      if (!await _applyScriptCookies(html)) {
+        return html;
+      }
     }
 
-    final challenge = _parseChallenge(html);
-    if (challenge == null) {
-      return html;
-    }
-
-    await _client.upsertCookie('__51guid__', Uri.encodeComponent(challenge));
-    await _client.upsertCookie('__51refresh__guid', '1');
-
-    final retry = await _client.dio.get<String>(
-      url,
-      options: Options(
-        responseType: ResponseType.plain,
-        headers: {...SiteConfig.mobileHeaders, 'Referer': _baseUrl},
-      ),
-    );
-    return retry.data ?? '';
+    throw StateError('播放页安全校验失败，请重试');
   }
 
   Future<Map<String, dynamic>> _fetchPlayData({
@@ -124,34 +121,25 @@ class PlayerApi {
     required String chapterSort,
     required String sign,
   }) async {
-    final response = await _postPlayData(
-      featureKey: featureKey,
-      novelId: novelId,
-      chapterId: chapterId,
-      chapterSort: chapterSort,
-      sign: sign,
-    );
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final response = await _postPlayData(
+        featureKey: featureKey,
+        novelId: novelId,
+        chapterId: chapterId,
+        chapterSort: chapterSort,
+        sign: sign,
+      );
 
-    if (!_isChallengeHtml(response)) {
-      return _asMap(response);
+      if (!_isChallengeHtml(response)) {
+        return _asMap(response);
+      }
+
+      if (!await _applyScriptCookies(response)) {
+        return _asMap(response);
+      }
     }
 
-    final challenge = _parseChallenge(response);
-    if (challenge == null) {
-      return _asMap(response);
-    }
-
-    await _client.upsertCookie('__51guid__', Uri.encodeComponent(challenge));
-    await _client.upsertCookie('__51refresh__guid', '1');
-
-    final retry = await _postPlayData(
-      featureKey: featureKey,
-      novelId: novelId,
-      chapterId: chapterId,
-      chapterSort: chapterSort,
-      sign: sign,
-    );
-    return _asMap(retry);
+    throw StateError('音频接口安全校验失败，请重试');
   }
 
   Future<String> _postPlayData({
@@ -176,6 +164,7 @@ class PlayerApi {
       data: {'encodedData': encodedData},
       options: Options(
         responseType: ResponseType.plain,
+        validateStatus: (status) => status != null && status < 500,
         headers: {
           ...SiteConfig.mobileHeaders,
           'Referer': '$_baseUrl/play/$featureKey.html',
@@ -193,15 +182,64 @@ class PlayerApi {
         html.contains('var reversed =');
   }
 
-  String? _parseChallenge(String html) {
-    final reversed = RegExp(r'var reversed = "([^"]+)"').firstMatch(html);
-    final encoded = reversed?.group(1);
-    if (encoded == null || encoded.isEmpty) {
+  Future<bool> _applyScriptCookies(String html) async {
+    final script = _decodeCookieScript(html) ?? html;
+    var changed = false;
+
+    final token = _readJsString(script, 'token');
+    if (token != null) {
+      await _client.upsertCookie('__51guid__', Uri.encodeComponent(token));
+      changed = true;
+    }
+
+    final refreshToken = _readJsString(script, 'refreshToken');
+    if (refreshToken != null) {
+      await _client.upsertCookie('__51refresh__guid', refreshToken);
+      changed = true;
+    }
+
+    final retry = RegExp(
+      r'var\s+retry\s*=\s*(\d+)',
+    ).firstMatch(script)?.group(1);
+    if (retry != null) {
+      await _client.upsertCookie('__51refresh__guid', retry);
+      changed = true;
+    }
+
+    final directCookiePattern = RegExp(
+      r"document\.cookie\s*=\s*'([^'=;]+)=([^';]*)",
+    );
+    for (final match in directCookiePattern.allMatches(script)) {
+      final name = match.group(1) ?? '';
+      final value = match.group(2) ?? '';
+      if (name.isNotEmpty && value.isNotEmpty) {
+        await _client.upsertCookie(name, value);
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
+  String? _decodeCookieScript(String html) {
+    final reversed = RegExp(
+      r'var\s+reversed\s*=\s*"([^"]+)"',
+    ).firstMatch(html)?.group(1);
+    if (reversed == null) {
       return null;
     }
 
-    final js = utf8.decode(base64.decode(encoded.split('').reversed.join()));
-    return RegExp(r"var token = '([^']+)'").firstMatch(js)?.group(1);
+    try {
+      return utf8.decode(base64.decode(reversed.split('').reversed.join()));
+    } on FormatException {
+      return null;
+    }
+  }
+
+  String? _readJsString(String script, String name) {
+    return RegExp(
+      "var\\s+$name\\s*=\\s*'([^']*)'",
+    ).firstMatch(script)?.group(1);
   }
 
   String? _metaContent(dynamic document, String name) {
@@ -216,9 +254,13 @@ class PlayerApi {
       return value.map((key, item) => MapEntry(key.toString(), item));
     }
     if (value is String) {
-      final decoded = jsonDecode(value);
-      if (decoded is Map) {
-        return decoded.map((key, item) => MapEntry(key.toString(), item));
+      try {
+        final decoded = jsonDecode(value);
+        if (decoded is Map) {
+          return decoded.map((key, item) => MapEntry(key.toString(), item));
+        }
+      } on FormatException {
+        throw StateError('音频接口返回无法解析');
       }
     }
     return <String, dynamic>{};
@@ -230,6 +272,156 @@ class PlayerApi {
     }
     return int.tryParse(value?.toString() ?? '') ?? 0;
   }
+
+  Future<LoginResult> login({
+    required String username,
+    required String password,
+  }) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final response = await _client.dio.get<String>(
+        '$_baseUrl/user/public/ajaxlogin',
+        queryParameters: {'username': username, 'password': password},
+        options: Options(
+          responseType: ResponseType.plain,
+          validateStatus: (status) => status != null && status < 500,
+          headers: {
+            ...SiteConfig.mobileHeaders,
+            'Referer': '$_baseUrl/user/public/login.html',
+            'Accept': 'application/json, text/plain, */*',
+          },
+        ),
+      );
+
+      final text = response.data ?? '';
+      if (_isChallengeHtml(text)) {
+        if (await _applyScriptCookies(text)) {
+          continue;
+        }
+      }
+
+      final data = _asMap(text);
+      final code = _readStatus(data['code']);
+      return LoginResult(
+        success: code == 200,
+        message: data['msg']?.toString() ?? (code == 200 ? '登录成功' : '登录失败'),
+      );
+    }
+
+    return const LoginResult(success: false, message: '登录安全校验失败，请重试');
+  }
+
+  Future<LoginResult> sendRegisterCode({required String email}) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final response = await _client.dio.post<String>(
+        '$_baseUrl/user/public/register_post',
+        data: {'email': email},
+        options: Options(
+          responseType: ResponseType.plain,
+          validateStatus: (status) => status != null && status < 500,
+          headers: {
+            ...SiteConfig.mobileHeaders,
+            'Referer': '$_baseUrl/user/public/register.html',
+            'Accept': 'application/json, text/plain, */*',
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        ),
+      );
+
+      final text = response.data ?? '';
+      if (_isChallengeHtml(text)) {
+        if (await _applyScriptCookies(text)) {
+          continue;
+        }
+      }
+
+      final data = _asMap(text);
+      final status = _readStatus(data['status']);
+      return LoginResult(
+        success: status == 200,
+        message: data['msg']?.toString() ?? (status == 200 ? '验证码已发送' : '发送失败'),
+      );
+    }
+
+    return const LoginResult(success: false, message: '发送验证码安全校验失败，请重试');
+  }
+
+  Future<LoginResult> registerByEmail({
+    required String email,
+    required String password,
+    required String code,
+  }) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final response = await _client.dio.post<String>(
+        '$_baseUrl/user/public/register.html',
+        data: {
+          'email': email,
+          'password': password,
+          'password1': password,
+          'ptext': '',
+          'ptext_PwdTwo': '',
+          'yanzhengma': code,
+          'image': '7',
+        },
+        options: Options(
+          responseType: ResponseType.plain,
+          validateStatus: (status) => status != null && status < 500,
+          followRedirects: true,
+          headers: {
+            ...SiteConfig.mobileHeaders,
+            'Referer': '$_baseUrl/user/public/register.html',
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        ),
+      );
+
+      final text = response.data ?? '';
+      if (_isChallengeHtml(text)) {
+        if (await _applyScriptCookies(text)) {
+          continue;
+        }
+      }
+
+      final lower = text.toLowerCase();
+      if (text.contains('注册成功') ||
+          text.contains('登录成功') ||
+          lower.contains('success')) {
+        return const LoginResult(success: true, message: '注册成功');
+      }
+
+      final message = _extractPageMessage(text) ?? '注册失败，请检查邮箱验证码';
+      return LoginResult(success: false, message: message);
+    }
+
+    return const LoginResult(success: false, message: '注册安全校验失败，请重试');
+  }
+
+  String? _extractPageMessage(String html) {
+    final title = RegExp(
+      r'<title>(.*?)</title>',
+      caseSensitive: false,
+      dotAll: true,
+    ).firstMatch(html)?.group(1);
+    if (title != null && title.trim().isNotEmpty) {
+      return title.trim();
+    }
+    return null;
+  }
+}
+
+class LoginRequiredException implements Exception {
+  const LoginRequiredException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+class LoginResult {
+  const LoginResult({required this.success, required this.message});
+
+  final bool success;
+  final String message;
 }
 
 class PlayerInfo {

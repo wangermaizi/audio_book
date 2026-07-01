@@ -356,7 +356,7 @@ class BookDetailApi {
   String _episodeTitle(dom.Element a) {
     final rawTitle = a.attributes['title'] ?? '';
     final titleMatch = RegExp(
-      r'\s*(?:\u7b2c\s*)?(\d+)\s*(?:\u96c6|\u7ae0|\u56de|\u671f)',
+      r'(?:^|[^\d])(?:\u7b2c\s*)?(\d{1,5})\s*(?:\u96c6|\u7ae0|\u56de|\u671f)',
     ).firstMatch(rawTitle);
     if (titleMatch != null) {
       return '\u7b2c${titleMatch.group(1)}\u96c6';
@@ -373,7 +373,19 @@ class BookDetailApi {
       noise.remove();
     }
 
-    return _cleanText(clone.text);
+    final text = _cleanText(
+      clone.text,
+    ).replaceFirst(RegExp(r'^\d{1,2}[-/]\d{1,2}\s+'), '');
+    final textMatch = RegExp(r'^(\d{1,5})(.*)$').firstMatch(text);
+    if (textMatch != null) {
+      final number = textMatch.group(1) ?? '';
+      final suffix = (textMatch.group(2) ?? '').trim();
+      return suffix.isEmpty
+          ? '\u7b2c$number\u96c6'
+          : '\u7b2c$number\u96c6 $suffix';
+    }
+
+    return text;
   }
 
   int _episodeNumber(BookEpisode episode) {
