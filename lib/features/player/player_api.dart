@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:dio/dio.dart';
 import 'package:html/parser.dart' as html_parser;
@@ -10,8 +11,10 @@ class PlayerApi {
   PlayerApi({ApiClient? client}) : _client = client ?? ApiClient();
 
   final ApiClient _client;
+  final Random _random = Random.secure();
 
   static const String _baseUrl = SiteConfig.baseUrl;
+  static const String _loginPath = '/user/public/login.html';
 
   Future<String> fetchPlayHtml(String featureKey) async {
     return _fetchPlayableHtml(featureKey);
@@ -193,7 +196,7 @@ class PlayerApi {
     }
 
     final refreshToken = _readJsString(script, 'refreshToken');
-    if (refreshToken != null) {
+    if (refreshToken != null && refreshToken.isNotEmpty) {
       await _client.upsertCookie('__51refresh__guid', refreshToken);
       changed = true;
     }
@@ -277,6 +280,14 @@ class PlayerApi {
     required String username,
     required String password,
   }) async {
+    return _loginWithSiteForm(username: username, password: password);
+  }
+
+  // ignore: unused_element
+  Future<LoginResult> _legacyAjaxLogin({
+    required String username,
+    required String password,
+  }) async {
     for (var attempt = 0; attempt < 3; attempt++) {
       final response = await _client.dio.get<String>(
         '$_baseUrl/user/public/ajaxlogin',
@@ -308,6 +319,120 @@ class PlayerApi {
     }
 
     return const LoginResult(success: false, message: '登录安全校验失败，请重试');
+  }
+
+  Future<LoginResult> _loginWithSiteForm({
+    required String username,
+    required String password,
+  }) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final loginPage = await _client.dio.get<String>(
+        '$_baseUrl$_loginPath',
+        options: Options(
+          responseType: ResponseType.plain,
+          validateStatus: (status) => status != null && status < 500,
+          headers: {...SiteConfig.mobileHeaders, 'Referer': '$_baseUrl/'},
+        ),
+      );
+
+      final pageText = loginPage.data ?? '';
+      if (_isChallengeHtml(pageText)) {
+        if (await _applyScriptCookies(pageText)) {
+          continue;
+        }
+        return const LoginResult(success: false, message: '登录安全校验失败，请重试');
+      }
+
+      final verificationToken = _generateVerificationToken();
+      await _client.dio.post<String>(
+        '$_baseUrl/user/public/store_token.html',
+        data: jsonEncode({'token': verificationToken}),
+        options: Options(
+          responseType: ResponseType.plain,
+          validateStatus: (status) => status != null && status < 500,
+          headers: {
+            ...SiteConfig.mobileHeaders,
+            'Referer': '$_baseUrl$_loginPath',
+            'Accept': '*/*',
+            'Content-Type': 'application/json',
+          },
+        ),
+      );
+
+      final response = await _client.dio.post<String>(
+        '$_baseUrl$_loginPath',
+        data: {
+          'username': username,
+          'password': password,
+          'ptext': '',
+          'verificationToken': verificationToken,
+        },
+        options: Options(
+          responseType: ResponseType.plain,
+          validateStatus: (status) => status != null && status < 500,
+          followRedirects: true,
+          headers: {
+            ...SiteConfig.mobileHeaders,
+            'Referer': '$_baseUrl$_loginPath',
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        ),
+      );
+
+      final text = response.data ?? '';
+      if (_isChallengeHtml(text)) {
+        if (await _applyScriptCookies(text)) {
+          continue;
+        }
+      }
+
+      if (_isLoggedInHtml(text)) {
+        return const LoginResult(success: true, message: '登录成功');
+      }
+
+      final data = _tryAsMap(text);
+      if (data.isNotEmpty) {
+        final code = _readStatus(data['code']);
+        final status = _readStatus(data['status']);
+        final success = code == 200 || status == 200;
+        return LoginResult(
+          success: success,
+          message: data['msg']?.toString() ?? (success ? '登录成功' : '登录失败'),
+        );
+      }
+
+      return LoginResult(
+        success: false,
+        message: _extractPageMessage(text) ?? '登录失败，请检查账号密码',
+      );
+    }
+
+    return const LoginResult(success: false, message: '登录安全校验失败，请重试');
+  }
+
+  String _generateVerificationToken() {
+    const characters =
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    return List.generate(
+      16,
+      (_) => characters[_random.nextInt(characters.length)],
+    ).join();
+  }
+
+  Map<String, dynamic> _tryAsMap(String value) {
+    try {
+      return _asMap(value);
+    } on StateError {
+      return <String, dynamic>{};
+    }
+  }
+
+  bool _isLoggedInHtml(String text) {
+    final cookie = _client.cookie ?? '';
+    return cookie.contains('PTCMS_userid=') ||
+        cookie.contains('PTCMS_token=') ||
+        text.contains('登录成功') ||
+        text.toLowerCase().contains('success');
   }
 
   Future<LoginResult> sendRegisterCode({required String email}) async {
