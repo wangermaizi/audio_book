@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -74,11 +76,16 @@ jobs:
       - name: Build App Bundle
         run: flutter build appbundle --release
 
+      - name: Generate release notes
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: python .github/scripts/generate_release_notes.py
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          body_path: release_notes.md
           files: |
             build/app/outputs/named-release/*.apk
             build/app/outputs/named-release/*.aab
-          generate_release_notes: true
