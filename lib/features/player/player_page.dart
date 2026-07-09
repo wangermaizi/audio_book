@@ -1,9 +1,14 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 
 import 'package:audio_book/core/logger/file_logger.dart';
+import 'package:audio_book/core/platform/system_share.dart';
+import 'package:audio_book/core/storage/local_library.dart';
 import 'package:audio_book/features/book_detail/book_detail_api.dart';
 import 'package:audio_book/features/book_detail/book_detail_models.dart';
 import 'package:audio_book/features/player/player_api.dart';
@@ -35,6 +40,8 @@ class _PlayerPageState extends State<PlayerPage> {
   late final AudioPlayer _player;
   final PlayerApi _api = PlayerApi();
   final BookDetailApi _bookDetailApi = BookDetailApi();
+  final LocalLibrary _library = LocalLibrary();
+  final SystemShare _share = SystemShare();
 
   PlayerInfo? _info;
   double _speed = 1;
@@ -43,6 +50,10 @@ class _PlayerPageState extends State<PlayerPage> {
   bool _loadingEpisodes = false;
   String? _loginSheetShownForFeatureKey;
   String? _playerError;
+  Timer? _sleepTimer;
+  DateTime? _sleepEndsAt;
+  StreamSubscription<Duration>? _positionSubscription;
+  DateTime? _lastProgressSaveAt;
   late int _currentIndex;
   late String _currentFeatureKey;
   late String _currentTitle;
@@ -54,6 +65,9 @@ class _PlayerPageState extends State<PlayerPage> {
   void initState() {
     super.initState();
     _player = AudioPlayer();
+    _positionSubscription = _player.positionStream.listen((_) {
+      _savePlaybackThrottled();
+    });
     _episodes = List<BookEpisode>.of(widget.episodes);
     _directoryPageLinks = List<DirectoryPageLink>.of(widget.directoryPageLinks)
       ..sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
@@ -74,6 +88,9 @@ class _PlayerPageState extends State<PlayerPage> {
 
   @override
   void dispose() {
+    _sleepTimer?.cancel();
+    _positionSubscription?.cancel();
+    _savePlayback();
     _player.dispose();
     super.dispose();
   }
@@ -93,9 +110,15 @@ class _PlayerPageState extends State<PlayerPage> {
       html: info.rawHtml,
     );
 
+    final cache = await _library.downloadCache(info.featureKey);
+    final cachedFile = cache?.isReady == true ? File(cache!.filePath) : null;
+    final audioUri = cachedFile != null && await cachedFile.exists()
+        ? Uri.file(cachedFile.path)
+        : Uri.parse(info.audioUrl);
+
     await _player.setAudioSource(
       AudioSource.uri(
-        Uri.parse(info.audioUrl),
+        audioUri,
         tag: MediaItem(
           id: info.featureKey,
           title: _displayTitle(info),
@@ -106,12 +129,21 @@ class _PlayerPageState extends State<PlayerPage> {
     );
     await _player.setSpeed(_speed);
 
+    final progress = await _library.chapterProgress(info.featureKey);
+    if (progress != null &&
+        !progress.isPlayed &&
+        progress.position > Duration.zero &&
+        progress.position < (progress.duration - const Duration(seconds: 3))) {
+      await _player.seek(progress.position);
+    }
+
     if (mounted) {
       setState(() {
         _info = info;
         _audioReady = true;
       });
     }
+    await _savePlayback();
 
     if (_playAfterLoad) {
       _playAfterLoad = false;
@@ -153,6 +185,7 @@ class _PlayerPageState extends State<PlayerPage> {
     try {
       if (_player.playing) {
         await _player.pause();
+        await _savePlayback();
       } else {
         await _player.play();
       }
@@ -171,7 +204,15 @@ class _PlayerPageState extends State<PlayerPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(_pageTitle())),
+      appBar: AppBar(
+        title: const Text('正在播放'),
+        actions: [
+          IconButton(
+            onPressed: _info == null ? null : _shareCurrent,
+            icon: const Icon(Icons.share_outlined),
+          ),
+        ],
+      ),
       body: FutureBuilder<PlayerInfo>(
         future: _future,
         builder: (context, snapshot) {
@@ -235,37 +276,48 @@ class _PlayerPageState extends State<PlayerPage> {
 
     return Column(
       children: [
-        AspectRatio(
-          aspectRatio: 1,
+        SizedBox(
+          width: 260,
+          height: 260,
           child: DecoratedBox(
             decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(24),
+              color: Colors.white,
+              shape: BoxShape.circle,
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.12),
-                  blurRadius: 24,
-                  offset: const Offset(0, 16),
+                  color: Colors.black.withValues(alpha: 0.16),
+                  blurRadius: 42,
+                  offset: const Offset(0, 24),
                 ),
               ],
             ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(24),
-              child: info.coverUrl.isEmpty
-                  ? const Icon(Icons.graphic_eq, size: 96)
-                  : Image.network(info.coverUrl, fit: BoxFit.cover),
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: ClipOval(
+                child: info.coverUrl.isEmpty
+                    ? const ColoredBox(
+                        color: Color(0xFFF0F4F8),
+                        child: Icon(Icons.graphic_eq, size: 96),
+                      )
+                    : Image.network(
+                        info.coverUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => const ColoredBox(
+                          color: Color(0xFFF0F4F8),
+                          child: Icon(Icons.graphic_eq, size: 96),
+                        ),
+                      ),
+              ),
             ),
           ),
         ),
-        const SizedBox(height: 22),
+        const SizedBox(height: 34),
         Text(
           title,
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
           textAlign: TextAlign.center,
-          style: Theme.of(
-            context,
-          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+          style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900),
         ),
         if (bookName.isNotEmpty) ...[
           const SizedBox(height: 8),
@@ -274,8 +326,10 @@ class _PlayerPageState extends State<PlayerPage> {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            style: const TextStyle(
+              color: Color(0xFF59606A),
+              fontSize: 17,
+              fontWeight: FontWeight.w700,
             ),
           ),
         ],
@@ -286,12 +340,11 @@ class _PlayerPageState extends State<PlayerPage> {
   Widget _buildControls(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+        color: Colors.white.withValues(alpha: 0.82),
+        borderRadius: BorderRadius.circular(28),
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 18, 18, 20),
+        padding: const EdgeInsets.fromLTRB(4, 18, 4, 20),
         child: Column(
           children: [
             StreamBuilder<Duration>(
@@ -313,9 +366,12 @@ class _PlayerPageState extends State<PlayerPage> {
                       children: [
                         SliderTheme(
                           data: SliderTheme.of(context).copyWith(
-                            trackHeight: 5,
+                            trackHeight: 7,
+                            activeTrackColor: const Color(0xFF2E9AF2),
+                            inactiveTrackColor: const Color(0xFFEAF4FF),
+                            thumbColor: Colors.white,
                             thumbShape: const RoundSliderThumbShape(
-                              enabledThumbRadius: 7,
+                              enabledThumbRadius: 11,
                             ),
                           ),
                           child: Slider(
@@ -379,8 +435,10 @@ class _PlayerPageState extends State<PlayerPage> {
                     return FilledButton(
                       style: FilledButton.styleFrom(
                         shape: const CircleBorder(),
-                        fixedSize: const Size.square(72),
+                        fixedSize: const Size.square(88),
                         padding: EdgeInsets.zero,
+                        backgroundColor: const Color(0xFF2E9AF2),
+                        elevation: 12,
                       ),
                       onPressed: _audioReady
                           ? () async {
@@ -394,7 +452,7 @@ class _PlayerPageState extends State<PlayerPage> {
                         _player.playing && !completed
                             ? Icons.pause
                             : Icons.play_arrow,
-                        size: 40,
+                        size: 48,
                       ),
                     );
                   },
@@ -429,17 +487,29 @@ class _PlayerPageState extends State<PlayerPage> {
               ],
             ),
             const SizedBox(height: 22),
-            Wrap(
-              alignment: WrapAlignment.center,
-              spacing: 8,
-              runSpacing: 8,
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                for (final speed in const [0.75, 1.0, 1.25, 1.5, 2.0])
-                  ChoiceChip(
-                    label: Text(_speedLabel(speed)),
-                    selected: _speed == speed,
-                    onSelected: _audioReady ? (_) => _changeSpeed(speed) : null,
-                  ),
+                _ToolButton(
+                  icon: Icons.speed,
+                  label: _speedLabel(_speed),
+                  onTap: _audioReady ? _showSpeedPicker : null,
+                ),
+                _ToolButton(
+                  icon: Icons.timer_outlined,
+                  label: _sleepTimer == null ? '睡眠定时' : '已定时',
+                  onTap: _showSleepTimerPicker,
+                ),
+                _ToolButton(
+                  icon: Icons.queue_music,
+                  label: '播放队列',
+                  onTap: _episodes.isEmpty ? null : _showPlaylistSheet,
+                ),
+                _ToolButton(
+                  icon: Icons.keyboard_arrow_down,
+                  label: '收起',
+                  onTap: () => Navigator.of(context).pop(),
+                ),
               ],
             ),
           ],
@@ -449,108 +519,356 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   Widget _buildPlaylist(BuildContext context) {
+    final nextIndex = _currentIndex + 1;
+    final nextEpisode = nextIndex < _episodes.length
+        ? _episodes[nextIndex]
+        : null;
+
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 24,
+            offset: const Offset(0, 12),
+          ),
+        ],
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+        padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Icon(
-                  Icons.queue_music,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
+                const Icon(Icons.queue_music, color: Color(0xFF2E9AF2)),
                 const SizedBox(width: 8),
-                Text(
-                  '播放列表',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
+                const Expanded(
+                  child: Text(
+                    '待播放队列',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
                   ),
                 ),
-                const Spacer(),
-                Text(
-                  '${_currentIndex + 1}/${_episodes.length}',
-                  style: Theme.of(context).textTheme.bodySmall,
+                TextButton(
+                  onPressed: _showPlaylistSheet,
+                  child: const Text('查看全部'),
                 ),
               ],
             ),
+            const SizedBox(height: 12),
+            _QueueRow(
+              label: '当前播放',
+              title: _episodes[_currentIndex].title,
+              active: true,
+              onTap: null,
+            ),
+            if (nextEpisode != null) ...[
+              const SizedBox(height: 8),
+              _QueueRow(
+                label: '下一章',
+                title: nextEpisode.title,
+                active: false,
+                onTap: () => _playEpisodeAt(nextIndex),
+              ),
+            ],
             if (_directoryPageLinks.isNotEmpty) ...[
-              const SizedBox(height: 10),
+              const SizedBox(height: 14),
               Row(
                 children: [
-                  OutlinedButton.icon(
-                    onPressed: _loadingEpisodes
-                        ? null
-                        : _showDirectoryPagePicker,
-                    icon: const Icon(Icons.view_list, size: 18),
-                    label: const Text('选集范围'),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _loadingEpisodes
+                          ? null
+                          : _showDirectoryPagePicker,
+                      icon: const Icon(Icons.view_list, size: 18),
+                      label: const Text('选择分段'),
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size.fromHeight(42),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
                   ),
-                  const Spacer(),
+                  const SizedBox(width: 10),
                   if (_loadingEpisodes)
-                    const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+                    const SizedBox(
+                      width: 42,
+                      height: 42,
+                      child: Center(
+                        child: SizedBox.square(
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ),
                     )
                   else if (_nextDirectoryPageLink != null)
-                    TextButton.icon(
+                    FilledButton.tonal(
                       onPressed: _loadNextDirectoryPage,
-                      icon: const Icon(Icons.expand_more, size: 18),
-                      label: const Text('加载更多'),
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(86, 42),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: const Text('更多'),
                     ),
                 ],
               ),
             ],
-            const SizedBox(height: 8),
-            ListView.separated(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: _episodes.length,
-              separatorBuilder: (context, index) => const Divider(height: 1),
-              itemBuilder: (context, index) {
-                final episode = _episodes[index];
-                final selected = index == _currentIndex;
-                return ListTile(
-                  dense: true,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-                  leading: SizedBox(
-                    width: 34,
-                    child: selected
-                        ? Icon(
-                            Icons.volume_up,
-                            color: Theme.of(context).colorScheme.primary,
-                            size: 20,
-                          )
-                        : Text(
-                            '${index + 1}',
-                            textAlign: TextAlign.center,
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                  ),
-                  title: Text(
-                    episode.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: selected
-                        ? TextStyle(
-                            color: Theme.of(context).colorScheme.primary,
-                            fontWeight: FontWeight.w700,
-                          )
-                        : null,
-                  ),
-                  onTap: selected ? null : () => _playEpisodeAt(index),
-                );
-              },
-            ),
           ],
         ),
       ),
     );
+  }
+
+  Future<void> _showSpeedPicker() async {
+    final selected = await showModalBottomSheet<double>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+            child: Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                for (final speed in const [0.75, 1.0, 1.25, 1.5, 2.0])
+                  ChoiceChip(
+                    label: Text(_speedLabel(speed)),
+                    selected: _speed == speed,
+                    onSelected: (_) => Navigator.of(context).pop(speed),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (selected != null) {
+      await _changeSpeed(selected);
+    }
+  }
+
+  Future<void> _showSleepTimerPicker() async {
+    final selected = await showModalBottomSheet<_SleepTimerChoice>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.timer_outlined),
+                  title: Text(_sleepTimer == null ? '睡眠定时' : '睡眠定时已开启'),
+                  subtitle: Text(
+                    _sleepTimer == null
+                        ? '到点后自动暂停播放'
+                        : '预计 ${_sleepEndsAt?.hour.toString().padLeft(2, '0')}:${_sleepEndsAt?.minute.toString().padLeft(2, '0')} 暂停',
+                  ),
+                ),
+                const Divider(height: 1),
+                for (final minutes in const [15, 30, 60])
+                  ListTile(
+                    leading: const Icon(Icons.schedule),
+                    title: Text('$minutes 分钟后停止'),
+                    onTap: () => Navigator.of(context).pop(
+                      _SleepTimerChoice(duration: Duration(minutes: minutes)),
+                    ),
+                  ),
+                ListTile(
+                  leading: const Icon(Icons.skip_next_outlined),
+                  title: const Text('播完当前集停止'),
+                  onTap: () => Navigator.of(
+                    context,
+                  ).pop(const _SleepTimerChoice(stopAfterCurrent: true)),
+                ),
+                if (_sleepTimer != null)
+                  ListTile(
+                    leading: const Icon(Icons.close),
+                    title: const Text('取消定时'),
+                    onTap: () => Navigator.of(
+                      context,
+                    ).pop(const _SleepTimerChoice(cancel: true)),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (selected == null) {
+      return;
+    }
+    if (selected.cancel) {
+      _cancelSleepTimer(showMessage: true);
+      return;
+    }
+    if (selected.stopAfterCurrent) {
+      _setSleepTimer(_remainingDuration, message: '将于当前集播放结束后停止');
+      return;
+    }
+    final duration = selected.duration;
+    if (duration != null) {
+      _setSleepTimer(duration, message: '${duration.inMinutes} 分钟后停止播放');
+    }
+  }
+
+  Duration get _remainingDuration {
+    final duration = _player.duration ?? Duration.zero;
+    final position = _player.position;
+    final remaining = duration - position;
+    return remaining.isNegative || remaining == Duration.zero
+        ? const Duration(minutes: 1)
+        : remaining;
+  }
+
+  void _setSleepTimer(Duration duration, {required String message}) {
+    _sleepTimer?.cancel();
+    _sleepEndsAt = DateTime.now().add(duration);
+    _sleepTimer = Timer(duration, () async {
+      await _player.pause();
+      await _savePlayback();
+      if (mounted) {
+        setState(() {
+          _sleepTimer = null;
+          _sleepEndsAt = null;
+        });
+        _showSnack('睡眠定时已暂停播放');
+      }
+    });
+    if (mounted) {
+      setState(() {});
+      _showSnack(message);
+    }
+  }
+
+  void _cancelSleepTimer({required bool showMessage}) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    _sleepEndsAt = null;
+    if (mounted) {
+      setState(() {});
+      if (showMessage) {
+        _showSnack('已取消睡眠定时');
+      }
+    }
+  }
+
+  Future<void> _showPlaylistSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: SizedBox(
+            height: MediaQuery.sizeOf(context).height * 0.72,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          '播放列表',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                      Text('${_currentIndex + 1}/${_episodes.length}'),
+                    ],
+                  ),
+                ),
+                if (_directoryPageLinks.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Row(
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: _loadingEpisodes
+                              ? null
+                              : _showDirectoryPagePicker,
+                          icon: const Icon(Icons.view_list, size: 18),
+                          label: const Text('选集范围'),
+                        ),
+                        const Spacer(),
+                        if (_loadingEpisodes)
+                          const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        else if (_nextDirectoryPageLink != null)
+                          TextButton.icon(
+                            onPressed: _loadNextDirectoryPage,
+                            icon: const Icon(Icons.expand_more, size: 18),
+                            label: const Text('加载更多'),
+                          ),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: ListView.separated(
+                    itemCount: _episodes.length,
+                    separatorBuilder: (context, index) =>
+                        const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final episode = _episodes[index];
+                      final selected = index == _currentIndex;
+                      return ListTile(
+                        leading: selected
+                            ? Icon(
+                                Icons.volume_up,
+                                color: Theme.of(context).colorScheme.primary,
+                              )
+                            : CircleAvatar(
+                                radius: 16,
+                                backgroundColor: const Color(0xFFF0F2F4),
+                                child: Text('${index + 1}'),
+                              ),
+                        title: Text(
+                          episode.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: selected
+                              ? TextStyle(
+                                  color: Theme.of(context).colorScheme.primary,
+                                  fontWeight: FontWeight.w900,
+                                )
+                              : null,
+                        ),
+                        onTap: selected
+                            ? null
+                            : () {
+                                Navigator.of(context).pop();
+                                _playEpisodeAt(index);
+                              },
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showSnack(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _seekRelative(Duration offset) async {
@@ -595,6 +913,7 @@ class _PlayerPageState extends State<PlayerPage> {
     }
 
     final episode = _episodes[index];
+    await _savePlayback();
     await _player.stop();
     _playAfterLoad = true;
     setState(() {
@@ -792,6 +1111,50 @@ class _PlayerPageState extends State<PlayerPage> {
     return '$minutes:$seconds';
   }
 
+  Future<void> _savePlayback() async {
+    final info = _info;
+    if (info == null) {
+      return;
+    }
+    await _library.savePlayback(
+      PlaybackRecord(
+        featureKey: info.featureKey,
+        bookName: info.bookName,
+        title: _displayTitle(info),
+        coverUrl: info.coverUrl,
+        position: _player.position,
+        duration: _player.duration ?? Duration.zero,
+        updatedAt: DateTime.now(),
+      ),
+    );
+  }
+
+  Future<void> _savePlaybackThrottled() async {
+    if (!_audioReady || _info == null) {
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastProgressSaveAt != null &&
+        now.difference(_lastProgressSaveAt!) < const Duration(seconds: 15)) {
+      return;
+    }
+    _lastProgressSaveAt = now;
+    await _savePlayback();
+  }
+
+  Future<void> _shareCurrent() async {
+    final info = _info;
+    if (info == null) {
+      return;
+    }
+    final title = _displayTitle(info);
+    final url = 'https://m.ting13.cc/play/${info.featureKey}.html';
+    await _share.text(
+      title: title,
+      content: '${info.bookName.isEmpty ? title : info.bookName}\n$title\n$url',
+    );
+  }
+
   String _extractFeatureKey(String playUrl) {
     final reg = RegExp(r'/play/([^/]+)\.html|/ting/([^/]+)\.html');
     final match = reg.firstMatch(playUrl);
@@ -821,6 +1184,130 @@ class _RoundControlButton extends StatelessWidget {
       style: IconButton.styleFrom(fixedSize: const Size.square(52)),
       onPressed: onPressed,
       icon: Icon(icon),
+    );
+  }
+}
+
+class _SleepTimerChoice {
+  const _SleepTimerChoice({
+    this.duration,
+    this.stopAfterCurrent = false,
+    this.cancel = false,
+  });
+
+  final Duration? duration;
+  final bool stopAfterCurrent;
+  final bool cancel;
+}
+
+class _ToolButton extends StatelessWidget {
+  const _ToolButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = onTap == null
+        ? Theme.of(context).disabledColor
+        : const Color(0xFF59606A);
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: color, size: 26),
+            const SizedBox(height: 7),
+            Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _QueueRow extends StatelessWidget {
+  const _QueueRow({
+    required this.label,
+    required this.title,
+    required this.active,
+    required this.onTap,
+  });
+
+  final String label;
+  final String title;
+  final bool active;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = active ? const Color(0xFF2E9AF2) : const Color(0xFF111827);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Ink(
+        decoration: BoxDecoration(
+          color: active ? const Color(0xFFEAF4FF) : const Color(0xFFF6F8FA),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: [
+              Icon(
+                active ? Icons.graphic_eq : Icons.play_arrow_rounded,
+                color: color,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      style: TextStyle(
+                        color: active
+                            ? const Color(0xFF2E9AF2)
+                            : const Color(0xFF8A94A3),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: color,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (onTap != null)
+                const Icon(Icons.chevron_right, color: Color(0xFF8A94A3)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

@@ -27,6 +27,10 @@ class BookDetailApi {
 
     final document = html_parser.parse(response.data ?? '');
     final directory = await _parseDirectory(document);
+    final parsedTotal = _parseTotalEpisodes(document);
+    final maxEpisodeNumber = directory.episodes
+        .map(_episodeNumber)
+        .fold<int>(0, (max, number) => number > max ? number : max);
 
     return BookDetail(
       bookId: bookId,
@@ -39,8 +43,12 @@ class BookDetailApi {
         fallbackLabel: '\u4e3b\u64ad',
       ),
       category: _parseInfo(document, '\u7c7b\u578b'),
+      heat: _parseInfo(document, '\u70ed\u5ea6'),
       date: _parseDate(document),
       introParagraphs: _parseIntro(document),
+      totalEpisodes: parsedTotal > maxEpisodeNumber
+          ? parsedTotal
+          : maxEpisodeNumber,
       episodes: directory.episodes,
       directoryPageLinks: directory.pageLinks,
       recommends: _parseRecommends(document),
@@ -68,9 +76,10 @@ class BookDetailApi {
 
   Future<_DirectoryData> _parseDirectory(dom.Document document) async {
     final directoryHref = _findDirectoryHref(document);
+    final pageEpisodes = _parseEpisodes(document, sortAscending: true);
     if (directoryHref == null || directoryHref.isEmpty) {
       return _DirectoryData(
-        episodes: _parseEpisodes(document, sortAscending: true),
+        episodes: pageEpisodes,
         pageLinks: const <DirectoryPageLink>[],
       );
     }
@@ -79,7 +88,7 @@ class BookDetailApi {
     final firstDocument = await _fetchDirectoryDocument(directoryUrl);
     if (firstDocument == null) {
       return _DirectoryData(
-        episodes: const <BookEpisode>[],
+        episodes: pageEpisodes,
         pageLinks: <DirectoryPageLink>[
           DirectoryPageLink(pageNumber: 1, label: '1-60', url: directoryUrl),
         ],
@@ -88,11 +97,14 @@ class BookDetailApi {
 
     final episodes = _parseEpisodes(firstDocument, sortAscending: true);
     return _DirectoryData(
-      episodes: episodes,
+      episodes: episodes.isEmpty ? pageEpisodes : episodes,
       pageLinks: _sortDirectoryPageLinks(<DirectoryPageLink>[
         DirectoryPageLink(
           pageNumber: 1,
-          label: _episodeRangeLabel(episodes, fallbackPageNumber: 1),
+          label: _episodeRangeLabel(
+            episodes.isEmpty ? pageEpisodes : episodes,
+            fallbackPageNumber: 1,
+          ),
           url: directoryUrl,
         ),
         ..._parseDirectoryPageLinks(firstDocument),
@@ -169,7 +181,7 @@ class BookDetailApi {
     }
 
     final refreshToken = _readJsString(script, 'refreshToken');
-    if (refreshToken != null) {
+    if (refreshToken != null && refreshToken.isNotEmpty) {
       await _client.upsertCookie('__51refresh__guid', refreshToken);
       changed = true;
     }
@@ -351,6 +363,33 @@ class BookDetailApi {
       }
     }
     return '';
+  }
+
+  int _parseTotalEpisodes(dom.Document document) {
+    final candidates = <String>[
+      document.querySelector('.book .book-rand-a:nth-child(4)')?.text ?? '',
+      document.querySelector('.book')?.text ?? '',
+      document.body?.text ?? '',
+    ];
+
+    for (final text in candidates) {
+      final match = RegExp(
+        r'(?:\u72b6\u6001|更新|连载|完结)[^\d]{0,12}(\d{1,5})\s*(?:\u96c6|\u7ae0|\u56de)',
+      ).firstMatch(_cleanText(text));
+      if (match != null) {
+        return int.tryParse(match.group(1) ?? '') ?? 0;
+      }
+    }
+
+    for (final text in candidates) {
+      final match = RegExp(
+        r'(\d{1,5})\s*(?:\u96c6|\u7ae0|\u56de)',
+      ).firstMatch(_cleanText(text));
+      if (match != null) {
+        return int.tryParse(match.group(1) ?? '') ?? 0;
+      }
+    }
+    return 0;
   }
 
   String _episodeTitle(dom.Element a) {

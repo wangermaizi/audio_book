@@ -1,7 +1,8 @@
 import 'dart:io';
 
 import 'package:dio/dio.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:audio_book/core/storage/local_library.dart';
 
 class ApiClient {
   ApiClient._internal() {
@@ -32,14 +33,13 @@ class ApiClient {
     );
   }
 
-  static const String _cookieStorageKey = 'ting13_cookie';
-
   static final ApiClient _instance = ApiClient._internal();
 
   factory ApiClient() => _instance;
 
   late final Dio dio;
   late final Future<void> _loadCookieFuture;
+  final LocalLibrary _library = LocalLibrary();
 
   final Map<String, String> _cookies = <String, String>{};
 
@@ -74,24 +74,14 @@ class ApiClient {
   }
 
   Future<void> _loadCookie() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedCookie = prefs.getString(_cookieStorageKey);
-    if (savedCookie == null || savedCookie.isEmpty) {
-      return;
-    }
+    final savedCookies = await _library.cookies();
     _cookies
       ..clear()
-      ..addAll(_parseCookieHeader(savedCookie));
+      ..addAll(savedCookies);
   }
 
   Future<void> _saveCookie() async {
-    final prefs = await SharedPreferences.getInstance();
-    final header = _cookieHeader;
-    if (header.isEmpty) {
-      await prefs.remove(_cookieStorageKey);
-      return;
-    }
-    await prefs.setString(_cookieStorageKey, header);
+    await _library.replaceCookies(_cookies);
   }
 
   Future<void> _storeResponseCookies(Headers headers) async {

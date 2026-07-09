@@ -1,9 +1,13 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 
 import 'package:audio_book/core/network/api_client.dart';
+import 'package:audio_book/core/storage/local_library.dart';
 import 'package:audio_book/features/book_detail/book_detail_page.dart';
 import 'package:audio_book/features/home/home_api.dart';
 import 'package:audio_book/features/home/home_models.dart';
+import 'package:audio_book/features/player/player_page.dart';
 import 'package:audio_book/features/search/search_page.dart';
 import 'package:audio_book/features/update/update_service.dart';
 
@@ -17,20 +21,29 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   late Future<HomeData> _future;
   final HomeApi _api = HomeApi();
+  final LocalLibrary _library = LocalLibrary();
   final UpdateService _updateService = UpdateService();
-
-  final TextEditingController _searchController = TextEditingController();
   final TextEditingController _cookieController = TextEditingController();
 
   int _titleTapCount = 0;
   DateTime? _lastTitleTapTime;
   bool _checkingUpdate = false;
   bool _autoUpdateChecked = false;
+  PlaybackRecord? _latestPlayback;
+
+  static const List<String> _categories = <String>[
+    '全部',
+    '悬疑恐怖',
+    '都市言情',
+    '玄幻修仙',
+    '历史军事',
+  ];
 
   @override
   void initState() {
     super.initState();
     _future = _api.fetchHome();
+    _loadLatestPlayback();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkForUpdate(silentWhenLatest: true);
     });
@@ -38,7 +51,6 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
-    _searchController.dispose();
     _cookieController.dispose();
     super.dispose();
   }
@@ -46,25 +58,8 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('有声听书'),
-        actions: [
-          IconButton(
-            tooltip: '检查更新',
-            onPressed: _checkingUpdate
-                ? null
-                : () => _checkForUpdate(silentWhenLatest: false),
-            icon: _checkingUpdate
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.system_update_alt),
-          ),
-        ],
-      ),
       body: SafeArea(
+        bottom: false,
         child: FutureBuilder<HomeData>(
           future: _future,
           builder: (context, snapshot) {
@@ -72,112 +67,581 @@ class _HomePageState extends State<HomePage> {
               return const Center(child: CircularProgressIndicator());
             }
             if (snapshot.hasError) {
-              return Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text('加载首页失败'),
-                      const SizedBox(height: 8),
-                      Text(
-                        '${snapshot.error}',
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodySmall?.copyWith(color: Colors.red),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: () {
-                          setState(() {
-                            _future = _api.fetchHome();
-                          });
-                        },
-                        child: const Text('重试'),
-                      ),
-                    ],
-                  ),
-                ),
+              return _StateView(
+                title: '首页加载失败',
+                message: '${snapshot.error}',
+                onRetry: _reload,
               );
             }
 
             final data = snapshot.data;
             if (data == null) {
-              return const Center(child: Text('没有数据'));
+              return _StateView(title: '暂无内容', onRetry: _reload);
             }
 
             return RefreshIndicator(
               onRefresh: () async {
-                setState(() {
-                  _future = _api.fetchHome();
-                });
+                _reload();
                 await _future;
               },
-              child: ListView(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 12,
-                    ),
-                    child: _buildSearchBar(context),
-                  ),
-                  _buildBanner(context, data.banners),
-                  const SizedBox(height: 16),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: GestureDetector(
+              child: CustomScrollView(
+                slivers: [
+                  SliverToBoxAdapter(child: _buildTopBar()),
+                  SliverToBoxAdapter(child: _buildBanner(data.banners)),
+                  SliverToBoxAdapter(child: _buildCategories()),
+                  SliverToBoxAdapter(
+                    child: _SectionHeader(
+                      title: '为你推荐',
+                      color: const Color(0xFF2E9AF2),
                       onTap: _onRecommendTitleTap,
-                      child: Text(
-                        '有声小说推荐收听',
-                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  ...data.recommendBooks.map(
-                    (b) => _buildRecommendItem(context, b),
+                  SliverToBoxAdapter(
+                    child: _buildRecommendRail(data.recommendBooks),
                   ),
+                  SliverToBoxAdapter(
+                    child: _SectionHeader(
+                      title: '编辑精选',
+                      color: const Color(0xFFFF9D2E),
+                      trailing: '查看全部',
+                    ),
+                  ),
+                  SliverToBoxAdapter(
+                    child: _buildEditorPick(data.recommendBooks),
+                  ),
+                  const SliverToBoxAdapter(child: SizedBox(height: 120)),
                 ],
               ),
             );
           },
         ),
       ),
+      bottomNavigationBar: FutureBuilder<HomeData>(
+        future: _future,
+        builder: (context, snapshot) {
+          final latest = _latestPlayback;
+          return _HomeBottomBar(
+            miniTitle: latest?.bookName ?? '',
+            miniSubtitle: latest == null
+                ? ''
+                : '继续收听 ${latest.title} · ${_progressText(latest)}',
+            miniCoverUrl: latest?.coverUrl ?? '',
+            onHome: () {},
+            onSearch: _openSearch,
+            onShelf: _showBookshelf,
+            onMine: _showMine,
+            onMiniPlay: latest == null ? null : () => _openPlayback(latest),
+            miniProgress: latest?.progress.clamp(0, 1) ?? 0,
+          );
+        },
+      ),
     );
   }
 
-  Widget _buildSearchBar(BuildContext context) {
-    return TextField(
-      controller: _searchController,
-      textInputAction: TextInputAction.search,
-      onSubmitted: _onSearchSubmitted,
-      decoration: InputDecoration(
-        hintText: '搜索有声小说',
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 12,
-          vertical: 10,
-        ),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(999)),
-        suffixIcon: IconButton(
-          icon: const Icon(Icons.search),
-          onPressed: () => _onSearchSubmitted(_searchController.text),
+  Widget _buildTopBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 18, 24, 18),
+      child: Row(
+        children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: const Color(0xFF2E9AF2),
+              borderRadius: BorderRadius.circular(11),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF2E9AF2).withValues(alpha: 0.25),
+                  blurRadius: 18,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: const Icon(Icons.bolt, color: Colors.white, size: 32),
+          ),
+          const Spacer(),
+          IconButton.filledTonal(
+            tooltip: '搜索',
+            onPressed: _openSearch,
+            icon: const Icon(Icons.search),
+          ),
+          const SizedBox(width: 10),
+          IconButton.filledTonal(
+            tooltip: '检查更新',
+            onPressed: _checkingUpdate
+                ? null
+                : () => _checkForUpdate(silentWhenLatest: false),
+            icon: _checkingUpdate
+                ? const SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.person),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBanner(List<HomeBanner> banners) {
+    if (banners.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final item = banners.first;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: () => _openBook(item.bookId, item.title),
+        child: AspectRatio(
+          aspectRatio: 1.9,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                _NetworkImage(url: item.imageUrl, fit: BoxFit.cover),
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.transparent,
+                        Colors.black.withValues(alpha: 0.78),
+                      ],
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: 18,
+                  right: 18,
+                  bottom: 18,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF9D2E),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 5,
+                          ),
+                          child: Text(
+                            '热门推荐',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        item.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
   }
 
-  void _onSearchSubmitted(String value) {
-    final query = value.trim();
-    if (query.isEmpty) {
-      return;
+  Widget _buildCategories() {
+    return SizedBox(
+      height: 78,
+      child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(24, 22, 24, 12),
+        scrollDirection: Axis.horizontal,
+        itemCount: _categories.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 12),
+        itemBuilder: (context, index) {
+          final selected = index == 0;
+          return ChoiceChip(
+            selected: selected,
+            label: Text(_categories[index]),
+            labelStyle: TextStyle(
+              color: selected ? Colors.white : const Color(0xFF59606A),
+              fontWeight: FontWeight.w800,
+            ),
+            selectedColor: const Color(0xFF2E9AF2),
+            backgroundColor: const Color(0xFFF7F8FA),
+            side: BorderSide.none,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            onSelected: (_) {},
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildRecommendRail(List<HomeRecommendBook> books) {
+    if (books.isEmpty) {
+      return const SizedBox.shrink();
     }
+    return SizedBox(
+      height: 300,
+      child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(24, 12, 24, 8),
+        scrollDirection: Axis.horizontal,
+        itemCount: books.take(8).length,
+        separatorBuilder: (_, _) => const SizedBox(width: 18),
+        itemBuilder: (context, index) {
+          final book = books[index];
+          return SizedBox(
+            width: 128,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(18),
+              onTap: () => _openBook(book.bookId, book.title),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(16),
+                            child: _NetworkImage(
+                              url: book.coverUrl,
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          right: 8,
+                          bottom: 8,
+                          child: CircleAvatar(
+                            radius: 18,
+                            backgroundColor: const Color(0xFF2E9AF2),
+                            child: const Icon(
+                              Icons.play_arrow,
+                              color: Colors.white,
+                              size: 20,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    book.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  _MetaLine(icon: Icons.person_outline, text: book.author),
+                  const SizedBox(height: 4),
+                  _MetaLine(
+                    icon: Icons.headphones_outlined,
+                    text: book.category,
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildEditorPick(List<HomeRecommendBook> books) {
+    if (books.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final book = books.length > 1 ? books[1] : books.first;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 12, 24, 18),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: () => _openBook(book.bookId, book.title),
+        child: Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: const Color(0xFFECEEF2)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.04),
+                blurRadius: 24,
+                offset: const Offset(0, 12),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: SizedBox(
+                  width: 96,
+                  height: 96,
+                  child: _NetworkImage(url: book.coverUrl, fit: BoxFit.cover),
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '本周热盘',
+                      style: TextStyle(
+                        color: Color(0xFFFF8A00),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      book.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      book.summary.isEmpty ? book.category : book.summary,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFF59606A),
+                        height: 1.45,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _reload() {
+    setState(() {
+      _future = _api.fetchHome();
+    });
+  }
+
+  void _openSearch() {
     Navigator.of(
       context,
-    ).push(MaterialPageRoute(builder: (_) => SearchPage(query: query)));
+    ).push(MaterialPageRoute(builder: (_) => const SearchPage())).then((_) {
+      _loadLatestPlayback();
+    });
+  }
+
+  void _openBook(String bookId, String title) {
+    if (bookId.isEmpty) {
+      return;
+    }
+    Navigator.of(context)
+        .push(
+          MaterialPageRoute(
+            builder: (_) => BookDetailPage(bookId: bookId, initialTitle: title),
+          ),
+        )
+        .then((_) {
+          _loadLatestPlayback();
+        });
+  }
+
+  Future<void> _loadLatestPlayback() async {
+    final latest = await _library.latestPlayback();
+    if (mounted) {
+      setState(() => _latestPlayback = latest);
+    }
+  }
+
+  void _openPlayback(PlaybackRecord record) {
+    Navigator.of(context)
+        .push(
+          MaterialPageRoute(
+            builder: (_) =>
+                PlayerPage(featureKey: record.featureKey, title: record.title),
+          ),
+        )
+        .then((_) => _loadLatestPlayback());
+  }
+
+  Future<void> _showBookshelf() async {
+    final books = await _library.bookshelf();
+    if (!mounted) {
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: ListView.separated(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+            itemCount: books.isEmpty ? 1 : books.length,
+            separatorBuilder: (context, index) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              if (books.isEmpty) {
+                return const ListTile(
+                  leading: Icon(Icons.library_books_outlined),
+                  title: Text('书架为空'),
+                  subtitle: Text('在书籍详情页点击“加入书架”后会显示在这里'),
+                );
+              }
+              final book = books[index];
+              return ListTile(
+                leading: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: SizedBox(
+                    width: 44,
+                    height: 56,
+                    child: _NetworkImage(url: book.coverUrl, fit: BoxFit.cover),
+                  ),
+                ),
+                title: Text(book.title),
+                subtitle: Text(
+                  [
+                    if (book.author.isNotEmpty) book.author,
+                    if (book.announcer.isNotEmpty) book.announcer,
+                    if (book.category.isNotEmpty) book.category,
+                  ].join(' · '),
+                ),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _openBook(book.bookId, book.title);
+                },
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showMine() async {
+    final records = await _library.playbackHistory();
+    final caches = await _library.downloadCaches();
+    if (!mounted) {
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+            children: [
+              const ListTile(
+                leading: Icon(Icons.person_outline),
+                title: Text('我的'),
+                subtitle: Text('本地书架、播放历史和更新能力'),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.system_update_alt),
+                title: const Text('检查更新'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _checkForUpdate(silentWhenLatest: false);
+                },
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.download_done_outlined),
+                title: const Text('下载缓存'),
+                subtitle: Text(
+                  caches.isEmpty ? '暂无缓存章节' : '${caches.length} 个章节',
+                ),
+              ),
+              if (caches.isNotEmpty)
+                for (final cache in caches.take(5))
+                  ListTile(
+                    dense: true,
+                    leading: Icon(
+                      cache.isReady
+                          ? Icons.check_circle_outline
+                          : Icons.error_outline,
+                    ),
+                    title: Text(cache.title),
+                    subtitle: Text(
+                      [
+                        if (cache.bookName.isNotEmpty) cache.bookName,
+                        if (cache.isReady)
+                          _formatBytes(cache.bytes)
+                        else
+                          cache.status,
+                      ].join(' · '),
+                    ),
+                  ),
+              const Divider(height: 1),
+              if (records.isEmpty)
+                const ListTile(
+                  leading: Icon(Icons.history),
+                  title: Text('暂无播放历史'),
+                )
+              else
+                for (final record in records.take(8))
+                  ListTile(
+                    leading: const Icon(Icons.history),
+                    title: Text(
+                      record.bookName.isEmpty ? record.title : record.bookName,
+                    ),
+                    subtitle: Text(
+                      '${record.title} · ${_progressText(record)}',
+                    ),
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      _openPlayback(record);
+                    },
+                  ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  String _progressText(PlaybackRecord record) {
+    final progress = (record.progress.clamp(0, 1) * 100).round();
+    return progress <= 0 ? '未播放' : '$progress%';
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes <= 0) {
+      return '0 KB';
+    }
+    final mb = bytes / 1024 / 1024;
+    if (mb >= 1) {
+      return '${mb.toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / 1024).round()} KB';
   }
 
   void _onRecommendTitleTap() {
@@ -206,171 +670,26 @@ class _HomePageState extends State<HomePage> {
             child: TextField(
               controller: _cookieController,
               maxLines: 5,
-              decoration: const InputDecoration(
-                hintText: '在这里粘贴从网页复制的 Cookie',
-                border: OutlineInputBorder(),
-              ),
+              decoration: const InputDecoration(hintText: '在这里粘贴从网页复制的 Cookie'),
             ),
           ),
           actions: [
             TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
+              onPressed: () => Navigator.of(context).pop(),
               child: const Text('取消'),
             ),
-            ElevatedButton(
+            FilledButton(
               onPressed: () async {
                 await ApiClient().setCookie(_cookieController.text);
-                if (!context.mounted) return;
-                Navigator.of(context).pop();
+                if (context.mounted) {
+                  Navigator.of(context).pop();
+                }
               },
               child: const Text('确认'),
             ),
           ],
         );
       },
-    );
-  }
-
-  Widget _buildBanner(BuildContext context, List<HomeBanner> banners) {
-    if (banners.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    return SizedBox(
-      height: 180,
-      child: PageView.builder(
-        controller: PageController(viewportFraction: 0.9),
-        itemCount: banners.length,
-        itemBuilder: (context, index) {
-          final item = banners[index];
-          return Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(12),
-              onTap: () {
-                if (item.bookId.isEmpty) return;
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => BookDetailPage(
-                      bookId: item.bookId,
-                      initialTitle: item.title,
-                    ),
-                  ),
-                );
-              },
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Image.network(item.imageUrl, fit: BoxFit.cover),
-                    Container(
-                      alignment: Alignment.bottomLeft,
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            Colors.transparent,
-                            Colors.black.withValues(alpha: 0.6),
-                          ],
-                        ),
-                      ),
-                      child: Text(
-                        item.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildRecommendItem(BuildContext context, HomeRecommendBook book) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Card(
-        elevation: 2,
-        clipBehavior: Clip.antiAlias,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        child: InkWell(
-          onTap: () {
-            if (book.bookId.isEmpty) return;
-            Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => BookDetailPage(
-                  bookId: book.bookId,
-                  initialTitle: book.title,
-                ),
-              ),
-            );
-          },
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SizedBox(
-                width: 96,
-                height: 128,
-                child: Image.network(book.coverUrl, fit: BoxFit.cover),
-              ),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        book.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        book.author,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        book.category,
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodySmall?.copyWith(color: Colors.blue),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        book.summary,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 
@@ -410,27 +729,115 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _showUpdateDialog(UpdateInfo update) async {
+    final notes = update.body
+        .split('\n')
+        .map((line) => line.replaceFirst(RegExp(r'^[-*]\s*'), '').trim())
+        .where((line) => line.isNotEmpty)
+        .take(4)
+        .toList();
+
     await showDialog<void>(
       context: context,
       builder: (context) {
-        return AlertDialog(
-          title: Text('发现新版本 ${update.tagName}'),
-          content: Text(
-            update.body.trim().isEmpty ? '是否下载并安装最新版本？' : update.body.trim(),
+        return Dialog(
+          insetPadding: const EdgeInsets.symmetric(horizontal: 30),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('稍后'),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(28, 32, 28, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 76,
+                  height: 76,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1F2328),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: const Icon(Icons.bolt, color: Colors.white, size: 46),
+                ),
+                const SizedBox(height: 24),
+                const Text(
+                  '发现新版本',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 10,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    _Pill(text: update.tagName),
+                    _Pill(text: update.apkName.isEmpty ? '' : update.apkName),
+                  ],
+                ),
+                const SizedBox(height: 22),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8FAFC),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: const Color(0xFFECEEF2)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const _DialogTitle(
+                        icon: Icons.info_outline,
+                        text: '更新日志',
+                      ),
+                      const SizedBox(height: 12),
+                      for (final note
+                          in notes.isEmpty ? const ['优化播放器体验。'] : notes)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(
+                                Icons.check_circle_outline,
+                                color: Color(0xFF2E9AF2),
+                                size: 20,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  note,
+                                  style: const TextStyle(height: 1.45),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 26),
+                FilledButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _downloadAndInstall(update);
+                  },
+                  icon: const Icon(Icons.arrow_circle_up_outlined),
+                  label: const Text('立即更新'),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(56),
+                    textStyle: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('以后再说'),
+                ),
+              ],
             ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                _downloadAndInstall(update);
-              },
-              child: const Text('下载更新'),
-            ),
-          ],
+          ),
         );
       },
     );
@@ -455,9 +862,7 @@ class _HomePageState extends State<HomePage> {
                     if (total <= 0) {
                       return;
                     }
-                    setDialogState(() {
-                      progress = received / total;
-                    });
+                    setDialogState(() => progress = received / total);
                   },
                 );
                 setDialogState(() => installing = true);
@@ -499,6 +904,374 @@ class _HomePageState extends State<HomePage> {
           },
         );
       },
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({
+    required this.title,
+    required this.color,
+    this.trailing,
+    this.onTap,
+  });
+
+  final String title;
+  final Color color;
+  final String? trailing;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
+      child: InkWell(
+        onTap: onTap,
+        child: Row(
+          children: [
+            Container(
+              width: 6,
+              height: 32,
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(999),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+            if (trailing != null)
+              Text(
+                '$trailing  ›',
+                style: const TextStyle(
+                  color: Color(0xFF59606A),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HomeBottomBar extends StatelessWidget {
+  const _HomeBottomBar({
+    required this.miniTitle,
+    required this.miniSubtitle,
+    required this.miniCoverUrl,
+    required this.miniProgress,
+    required this.onHome,
+    required this.onSearch,
+    required this.onShelf,
+    required this.onMine,
+    required this.onMiniPlay,
+  });
+
+  final String miniTitle;
+  final String miniSubtitle;
+  final String miniCoverUrl;
+  final double miniProgress;
+  final VoidCallback onHome;
+  final VoidCallback onSearch;
+  final VoidCallback onShelf;
+  final VoidCallback onMine;
+  final VoidCallback? onMiniPlay;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.94),
+            border: const Border(top: BorderSide(color: Color(0xFFECEEF2))),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (miniTitle.isNotEmpty)
+                  LinearProgressIndicator(
+                    value: miniProgress <= 0 ? null : miniProgress,
+                    minHeight: 3,
+                    backgroundColor: const Color(0xFFEAF4FF),
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                if (miniTitle.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 10, 22, 8),
+                    child: Row(
+                      children: [
+                        ClipOval(
+                          child: SizedBox(
+                            width: 42,
+                            height: 42,
+                            child: _NetworkImage(
+                              url: miniCoverUrl,
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                miniTitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              Text(
+                                miniSubtitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Color(0xFF59606A),
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton.filled(
+                          onPressed: onMiniPlay,
+                          icon: const Icon(Icons.play_arrow),
+                        ),
+                      ],
+                    ),
+                  ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _NavButton(
+                      icon: Icons.home_outlined,
+                      activeIcon: Icons.home,
+                      label: '首页',
+                      active: true,
+                      onTap: onHome,
+                    ),
+                    _NavButton(
+                      icon: Icons.search,
+                      label: '搜索',
+                      onTap: onSearch,
+                    ),
+                    _NavButton(
+                      icon: Icons.library_books_outlined,
+                      label: '书架',
+                      onTap: onShelf,
+                    ),
+                    _NavButton(
+                      icon: Icons.person_outline,
+                      label: '我的',
+                      onTap: onMine,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NavButton extends StatelessWidget {
+  const _NavButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.activeIcon,
+    this.active = false,
+  });
+
+  final IconData icon;
+  final IconData? activeIcon;
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = active
+        ? Theme.of(context).colorScheme.primary
+        : const Color(0xFF59606A);
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                active ? (activeIcon ?? icon) : icon,
+                color: color,
+                size: 28,
+              ),
+              Text(
+                label,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 12,
+                  fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NetworkImage extends StatelessWidget {
+  const _NetworkImage({required this.url, required this.fit});
+
+  final String url;
+  final BoxFit fit;
+
+  @override
+  Widget build(BuildContext context) {
+    if (url.isEmpty) {
+      return const ColoredBox(
+        color: Color(0xFFF0F4F8),
+        child: Icon(Icons.menu_book, color: Color(0xFF9AA4B2), size: 42),
+      );
+    }
+    return Image.network(
+      url,
+      fit: fit,
+      errorBuilder: (_, _, _) => const ColoredBox(
+        color: Color(0xFFF0F4F8),
+        child: Icon(Icons.menu_book, color: Color(0xFF9AA4B2), size: 42),
+      ),
+    );
+  }
+}
+
+class _MetaLine extends StatelessWidget {
+  const _MetaLine({required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    if (text.trim().isEmpty) {
+      return const SizedBox(height: 16);
+    }
+    return Row(
+      children: [
+        Icon(icon, size: 14, color: const Color(0xFF59606A)),
+        const SizedBox(width: 4),
+        Expanded(
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: Color(0xFF59606A), fontSize: 12),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _Pill extends StatelessWidget {
+  const _Pill({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    if (text.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFFEAF4FF),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        child: Text(
+          text,
+          style: const TextStyle(
+            color: Color(0xFF2E9AF2),
+            fontWeight: FontWeight.w800,
+            fontSize: 12,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DialogTitle extends StatelessWidget {
+  const _DialogTitle({required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, color: const Color(0xFF2E9AF2), size: 20),
+        const SizedBox(width: 8),
+        Text(text, style: const TextStyle(fontWeight: FontWeight.w900)),
+      ],
+    );
+  }
+}
+
+class _StateView extends StatelessWidget {
+  const _StateView({required this.title, this.message, required this.onRetry});
+
+  final String title;
+  final String? message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+            ),
+            if (message != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                message!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Color(0xFF59606A)),
+              ),
+            ],
+            const SizedBox(height: 16),
+            FilledButton(onPressed: onRetry, child: const Text('重试')),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -45,8 +45,10 @@ class BookDetail {
     required this.author,
     required this.announcer,
     required this.category,
+    required this.heat,
     required this.date,
     required this.introParagraphs,
+    required this.totalEpisodes,
     required this.episodes,
     required this.directoryPageLinks,
     required this.recommends,
@@ -58,8 +60,10 @@ class BookDetail {
   final String author;
   final String announcer;
   final String category;
+  final String heat;
   final String date;
   final List<String> introParagraphs;
+  final int totalEpisodes;
   final List<BookEpisode> episodes;
   final List<DirectoryPageLink> directoryPageLinks;
   final List<BookRecommend> recommends;

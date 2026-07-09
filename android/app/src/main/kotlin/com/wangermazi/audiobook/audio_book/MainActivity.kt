@@ -12,6 +12,7 @@ import java.io.File
 
 class MainActivity : AudioServiceActivity() {
     private val updateChannel = "com.wangermazi.audiobook.audio_book/update"
+    private val shareChannel = "com.wangermazi.audiobook.audio_book/share"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -29,6 +30,26 @@ class MainActivity : AudioServiceActivity() {
                             result.success(null)
                         } catch (error: Exception) {
                             result.error("INSTALL_FAILED", error.message, null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, shareChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "shareText" -> {
+                        val title = call.argument<String>("title").orEmpty()
+                        val content = call.argument<String>("content").orEmpty()
+                        if (content.isBlank()) {
+                            result.error("INVALID_CONTENT", "Share content is empty", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            shareText(title, content)
+                            result.success(null)
+                        } catch (error: Exception) {
+                            result.error("SHARE_FAILED", error.message, null)
                         }
                     }
                     else -> result.notImplemented()
@@ -58,5 +79,17 @@ class MainActivity : AudioServiceActivity() {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         startActivity(installIntent)
+    }
+
+    private fun shareText(title: String, content: String) {
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, title)
+            putExtra(Intent.EXTRA_TEXT, content)
+        }
+        val chooser = Intent.createChooser(sendIntent, if (title.isBlank()) "分享" else title).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(chooser)
     }
 }
