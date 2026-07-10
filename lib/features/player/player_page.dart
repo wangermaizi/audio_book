@@ -204,10 +204,16 @@ class _PlayerPageState extends State<PlayerPage> {
       }
 
       if (index < 0) {
+        index = _indexOfTitle(_displayTitle(info));
+      }
+      if (index < 0 && _episodes.isNotEmpty) {
+        index = _currentIndex.clamp(0, _episodes.length - 1);
+      }
+      if (index < 0) {
         return false;
       }
       _currentIndex = index;
-      _currentFeatureKey = info.featureKey;
+      _currentFeatureKey = _extractFeatureKey(_episodes[index].playUrl);
       _currentTitle = _episodes[index].title;
       return true;
     } catch (error) {
@@ -220,6 +226,24 @@ class _PlayerPageState extends State<PlayerPage> {
     return _episodes.indexWhere((episode) {
       return _extractFeatureKey(episode.playUrl) == featureKey;
     });
+  }
+
+  int _indexOfTitle(String title) {
+    final normalizedTitle = _normalizeEpisodeTitle(title);
+    if (normalizedTitle.isEmpty) {
+      return -1;
+    }
+    return _episodes.indexWhere((episode) {
+      return _normalizeEpisodeTitle(episode.title) == normalizedTitle;
+    });
+  }
+
+  String _normalizeEpisodeTitle(String title) {
+    return title
+        .replaceAll(RegExp(r'\s+'), '')
+        .replaceFirst(RegExp(r'^第0*'), '')
+        .replaceFirst(RegExp(r'[章节集回]$'), '')
+        .toLowerCase();
   }
 
   Future<void> _loadSkipSettings() async {
@@ -371,9 +395,15 @@ class _PlayerPageState extends State<PlayerPage> {
             ],
             _buildNowPlaying(context, info),
             const SizedBox(height: 22),
-            _buildControls(context),
-            const SizedBox(height: 18),
-            _buildPlaylistSection(context),
+            if (widget.embedded && _episodes.isEmpty) ...[
+              _buildPlaylistSection(context),
+              const SizedBox(height: 18),
+              _buildControls(context),
+            ] else ...[
+              _buildControls(context),
+              const SizedBox(height: 18),
+              _buildPlaylistSection(context),
+            ],
             if (_playerError != null) ...[
               const SizedBox(height: 14),
               Text(
@@ -420,14 +450,15 @@ class _PlayerPageState extends State<PlayerPage> {
   Widget _buildNowPlaying(BuildContext context, PlayerInfo info) {
     final title = _displayTitle(info);
     final bookName = info.bookName.isEmpty ? '' : info.bookName;
+    final coverSize = widget.embedded ? 220.0 : 260.0;
 
     return Column(
       children: [
         Hero(
               tag: 'player-cover-${info.featureKey}',
               child: SizedBox(
-                width: 260,
-                height: 260,
+                width: coverSize,
+                height: coverSize,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     color: Colors.white,

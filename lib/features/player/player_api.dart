@@ -29,7 +29,8 @@ class PlayerApi {
           _metaContent(document, 'og:title') ??
           '',
     );
-    final novelId = _metaContent(document, '_b');
+    final apiNovelId = _metaContent(document, '_b');
+    final bookId = _parseBookId(document) ?? '';
     final chapterId = _metaContent(document, '_p');
     final chapterSort = _metaContent(document, '_d') ?? 'read';
     final sign = _metaContent(document, '_c');
@@ -39,13 +40,13 @@ class PlayerApi {
         _metaContent(document, 'og:image') ??
         '';
 
-    if (novelId == null || chapterId == null || sign == null) {
+    if (apiNovelId == null || chapterId == null || sign == null) {
       throw StateError('播放页缺少音频接口参数');
     }
 
     final data = await _fetchPlayData(
       featureKey: featureKey,
-      novelId: novelId,
+      novelId: apiNovelId,
       chapterId: chapterId,
       chapterSort: chapterSort,
       sign: sign,
@@ -67,7 +68,7 @@ class PlayerApi {
 
     return PlayerInfo(
       featureKey: featureKey,
-      bookId: novelId,
+      bookId: bookId,
       title: title,
       bookName: bookName,
       coverUrl: coverUrl,
@@ -251,6 +252,26 @@ class PlayerApi {
             .querySelector('meta[name="$name"]')
             ?.attributes['content'] ??
         document.querySelector('meta[property="$name"]')?.attributes['content'];
+  }
+
+  String? _parseBookId(dynamic document) {
+    final scriptText = document
+        .querySelectorAll('script')
+        .map((script) {
+          return script.text;
+        })
+        .join('\n');
+    final scriptId = RegExp(
+      r'var\s+novelid\s*=\s*([0-9]+)',
+    ).firstMatch(scriptText)?.group(1);
+    if (scriptId != null && scriptId.isNotEmpty) {
+      return scriptId;
+    }
+
+    final link = document.querySelector('a[href*="/youshengxiaoshuo/"]');
+    final href = link?.attributes['href'] ?? '';
+    final match = RegExp(r'/youshengxiaoshuo/([^/]+)/').firstMatch(href);
+    return match?.group(1);
   }
 
   Map<String, dynamic> _asMap(dynamic value) {
