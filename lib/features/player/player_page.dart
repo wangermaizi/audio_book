@@ -355,6 +355,10 @@ class _PlayerPageState extends State<PlayerPage> {
       future: _future,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
+          final info = _info;
+          if (info != null) {
+            return _buildPlayerContent(context, info);
+          }
           return Column(
             children: [
               if (widget.embedded) _buildEmbeddedHeader(),
@@ -386,37 +390,41 @@ class _PlayerPageState extends State<PlayerPage> {
           return _ErrorView(error: '没有播放数据', onRetry: _retry);
         }
 
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
-          children: [
-            if (widget.embedded) ...[
-              _buildEmbeddedHeader(),
-              const SizedBox(height: 10),
-            ],
-            _buildNowPlaying(context, info),
-            const SizedBox(height: 22),
-            if (widget.embedded && _episodes.isEmpty) ...[
-              _buildPlaylistSection(context),
-              const SizedBox(height: 18),
-              _buildControls(context),
-            ] else ...[
-              _buildControls(context),
-              const SizedBox(height: 18),
-              _buildPlaylistSection(context),
-            ],
-            if (_playerError != null) ...[
-              const SizedBox(height: 14),
-              Text(
-                _playerError!,
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: Colors.red),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ],
-        );
+        return _buildPlayerContent(context, info);
       },
+    );
+  }
+
+  Widget _buildPlayerContent(BuildContext context, PlayerInfo info) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+      children: [
+        if (widget.embedded) ...[
+          _buildEmbeddedHeader(),
+          const SizedBox(height: 10),
+        ],
+        _buildNowPlaying(context, info),
+        const SizedBox(height: 22),
+        if (widget.embedded && _episodes.isEmpty) ...[
+          _buildPlaylistSection(context),
+          const SizedBox(height: 18),
+          _buildControls(context),
+        ] else ...[
+          _buildControls(context),
+          const SizedBox(height: 18),
+          _buildPlaylistSection(context),
+        ],
+        if (_playerError != null) ...[
+          const SizedBox(height: 14),
+          Text(
+            _playerError!,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: Colors.red),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ],
     );
   }
 
@@ -1358,11 +1366,29 @@ class _PlayerPageState extends State<PlayerPage> {
       _currentFeatureKey = _extractFeatureKey(episode.playUrl);
       _currentTitle = episode.title;
       _loginSheetShownForFeatureKey = null;
-      _info = null;
+      _info = _retitleCurrentInfo(episode);
       _audioReady = false;
       _playerError = null;
       _future = _load();
     });
+  }
+
+  PlayerInfo? _retitleCurrentInfo(BookEpisode episode) {
+    final info = _info;
+    if (info == null) {
+      return null;
+    }
+    return PlayerInfo(
+      featureKey: _extractFeatureKey(episode.playUrl),
+      bookId: info.bookId,
+      title: episode.title,
+      bookName: info.bookName,
+      coverUrl: info.coverUrl,
+      audioUrl: info.audioUrl,
+      status: info.status,
+      message: info.message,
+      rawHtml: info.rawHtml,
+    );
   }
 
   Future<bool> _restorePlaylistContext() async {
