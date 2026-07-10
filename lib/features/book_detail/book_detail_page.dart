@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'package:audio_book/core/player/playback_controller.dart';
 import 'package:audio_book/core/platform/system_share.dart';
 import 'package:audio_book/core/storage/local_library.dart';
 import 'package:audio_book/features/book_detail/book_detail_api.dart';
@@ -38,6 +39,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
   bool _episodesAscending = true;
   bool _loadingMoreEpisodes = false;
   bool _inBookshelf = false;
+  BookDetail? _detail;
   PlaybackRecord? _latestPlayback;
   Map<String, ChapterProgress> _chapterProgress = const {};
   Map<String, DownloadCacheRecord> _downloadCaches = const {};
@@ -76,7 +78,9 @@ class _BookDetailPageState extends State<BookDetailPage> {
           if (detail == null) {
             return const Center(child: Text('暂无数据'));
           }
+          _detail = detail;
           _syncEpisodes(detail);
+          final latest = _latestPlayback;
 
           return Stack(
             children: [
@@ -106,11 +110,22 @@ class _BookDetailPageState extends State<BookDetailPage> {
                 right: 0,
                 bottom: 0,
                 child: _BottomPlayBar(
-                  text: _episodes.isEmpty ? '暂无可播放章节' : '继续播放',
-                  subtitle: _episodes.isEmpty ? '' : _episodes.first.title,
-                  onPressed: _episodes.isEmpty
+                  text: latest == null
+                      ? (_episodes.isEmpty ? '暂无可播放章节' : '继续播放')
+                      : (latest.bookName.isEmpty
+                            ? latest.title
+                            : latest.bookName),
+                  subtitle: latest == null
+                      ? (_episodes.isEmpty ? '' : _episodes.first.title)
+                      : '继续收听 ${latest.title} · ${_progressText(latest)}',
+                  onPressed: latest == null
+                      ? (_episodes.isEmpty
+                            ? null
+                            : () => _openPlayer(context, _episodes.first))
+                      : () => _openPlayback(latest),
+                  onPlayPressed: latest == null
                       ? null
-                      : () => _openPlayer(context, _episodes.first),
+                      : () => _playLatestPlayback(latest),
                 ),
               ),
             ],
@@ -330,7 +345,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
           if (episodes.isEmpty)
             const Text('暂无章节')
           else
-            for (var i = 0; i < episodes.take(12).length; i++)
+            for (var i = 0; i < episodes.length; i++)
               Builder(
                 builder: (context) {
                   final episode = episodes[i];
@@ -347,7 +362,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
                   );
                 },
               ),
-          if (episodes.length > 12 || canLoadMore || _loadingMoreEpisodes)
+          if (canLoadMore || _loadingMoreEpisodes)
             Padding(
               padding: const EdgeInsets.only(top: 12),
               child: OutlinedButton(
@@ -363,7 +378,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
                 child: Text(
                   _loadingMoreEpisodes
                       ? '加载中...'
-                      : (canLoadMore ? '查看更多章节' : '已显示部分章节'),
+                      : (canLoadMore ? '查看更多章节' : '已显示全部已加载章节'),
                 ),
               ),
             ),
@@ -458,7 +473,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
     }
     _episodes.addAll(detail.episodes);
     _directoryPageLinks = detail.directoryPageLinks;
-    _loadEpisodeStates();
+    _loadEpisodeStates(detail);
   }
 
   Future<void> _loadBookshelfStatus() async {
@@ -501,20 +516,39 @@ class _BookDetailPageState extends State<BookDetailPage> {
     await _share.text(title: detail.name, content: '${detail.name}\n$url');
   }
 
-  Future<void> _loadEpisodeStates() async {
+  Future<void> _loadEpisodeStates(BookDetail? detail) async {
     final featureKeys = _episodes.map((episode) {
       return _extractFeatureKey(episode.playUrl);
-    });
+    }).toSet();
     final progress = await _library.chapterProgressByFeatureKeys(featureKeys);
     final caches = await _library.downloadCacheByFeatureKeys(featureKeys);
     final latest = await _library.latestPlayback();
+    final currentBookLatest =
+        detail != null && _isPlaybackForCurrentBook(latest, detail, featureKeys)
+        ? latest
+        : null;
     if (mounted) {
       setState(() {
         _chapterProgress = progress;
         _downloadCaches = caches;
-        _latestPlayback = latest;
+        _latestPlayback = currentBookLatest;
       });
     }
+  }
+
+  bool _isPlaybackForCurrentBook(
+    PlaybackRecord? record,
+    BookDetail detail,
+    Set<String> loadedFeatureKeys,
+  ) {
+    if (record == null) {
+      return false;
+    }
+    if (loadedFeatureKeys.contains(record.featureKey)) {
+      return true;
+    }
+    final recordBookName = record.bookName.trim();
+    return recordBookName.isNotEmpty && recordBookName == detail.name.trim();
   }
 
   Future<void> _showCacheHint(BookDetail detail) async {
@@ -604,7 +638,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
           updatedAt: DateTime.now(),
         ),
       );
-      await _loadEpisodeStates();
+      await _loadEpisodeStates(detail);
       _snack('已缓存 ${episode.title}');
     } catch (error) {
       await _library.saveDownloadCache(
@@ -677,7 +711,7 @@ class _BookDetailPageState extends State<BookDetailPage> {
         _loadedDirectoryPages.add(link.pageNumber);
         _mergeDirectoryPageLinks(data.pageLinks);
       });
-      await _loadEpisodeStates();
+      await _loadEpisodeStates(_detail);
     } finally {
       if (mounted) {
         setState(() => _loadingMoreEpisodes = false);
@@ -755,20 +789,49 @@ class _BookDetailPageState extends State<BookDetailPage> {
     final currentIndex = playlist.indexWhere(
       (item) => item.playUrl == episode.playUrl,
     );
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => PlayerPage(
-          featureKey: featureKey,
-          title: episode.title,
-          episodes: playlist,
-          directoryPageLinks: List<DirectoryPageLink>.unmodifiable(
-            _directoryPageLinks,
+    Navigator.of(context)
+        .push(
+          MaterialPageRoute(
+            builder: (_) => PlayerPage(
+              featureKey: featureKey,
+              title: episode.title,
+              episodes: playlist,
+              directoryPageLinks: List<DirectoryPageLink>.unmodifiable(
+                _directoryPageLinks,
+              ),
+              loadedDirectoryPages: Set<int>.unmodifiable(
+                _loadedDirectoryPages,
+              ),
+              initialIndex: currentIndex < 0 ? 0 : currentIndex,
+            ),
           ),
-          loadedDirectoryPages: Set<int>.unmodifiable(_loadedDirectoryPages),
-          initialIndex: currentIndex < 0 ? 0 : currentIndex,
-        ),
-      ),
-    );
+        )
+        .then((_) => _loadEpisodeStates(_detail));
+  }
+
+  void _openPlayback(PlaybackRecord record, {bool autoPlay = false}) {
+    Navigator.of(context)
+        .push(
+          MaterialPageRoute(
+            builder: (_) => PlayerPage(
+              featureKey: record.featureKey,
+              title: record.title,
+              autoPlay: autoPlay,
+            ),
+          ),
+        )
+        .then((_) => _loadEpisodeStates(_detail));
+  }
+
+  Future<void> _playLatestPlayback(PlaybackRecord record) async {
+    try {
+      await PlaybackController.instance.playRecord(record);
+      await _loadEpisodeStates(_detail);
+    } catch (error) {
+      if (mounted) {
+        _snack('播放失败：$error');
+      }
+    }
   }
 
   void _snack(String message) {
@@ -787,6 +850,11 @@ class _BookDetailPageState extends State<BookDetailPage> {
   int _episodeNumber(BookEpisode episode) {
     final titleNumber = RegExp(r'\d+').firstMatch(episode.title)?.group(0);
     return int.tryParse(titleNumber ?? '') ?? 0;
+  }
+
+  String _progressText(PlaybackRecord record) {
+    final progress = (record.progress.clamp(0, 1) * 100).round();
+    return progress <= 0 ? '未播放' : '$progress%';
   }
 
   String _extractFeatureKey(String playUrl) {
@@ -1051,11 +1119,13 @@ class _BottomPlayBar extends StatelessWidget {
     required this.text,
     required this.subtitle,
     required this.onPressed,
+    this.onPlayPressed,
   });
 
   final String text;
   final String subtitle;
   final VoidCallback? onPressed;
+  final VoidCallback? onPlayPressed;
 
   @override
   Widget build(BuildContext context) {
@@ -1071,33 +1141,62 @@ class _BottomPlayBar extends StatelessWidget {
             top: false,
             child: Padding(
               padding: const EdgeInsets.fromLTRB(24, 14, 24, 18),
-              child: FilledButton.icon(
-                onPressed: onPressed,
-                icon: const Icon(Icons.play_arrow),
-                label: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      text,
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    if (subtitle.isNotEmpty)
-                      Text(
-                        subtitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(16),
+                onTap: onPressed,
+                child: Container(
+                  constraints: const BoxConstraints(minHeight: 62),
+                  padding: const EdgeInsets.fromLTRB(16, 10, 10, 10),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.primary,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.graphic_eq, color: Colors.white),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              text,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 17,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            if (subtitle.isNotEmpty)
+                              Text(
+                                subtitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.82),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                          ],
                         ),
                       ),
-                  ],
-                ),
-                style: FilledButton.styleFrom(
-                  minimumSize: const Size.fromHeight(58),
+                      IconButton.filledTonal(
+                        tooltip: '播放',
+                        onPressed: onPlayPressed ?? onPressed,
+                        icon: const Icon(Icons.play_arrow),
+                        style: IconButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: Theme.of(
+                            context,
+                          ).colorScheme.primary,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

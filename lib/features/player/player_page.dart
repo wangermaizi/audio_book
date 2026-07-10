@@ -1,12 +1,9 @@
 import 'dart:async';
-import 'dart:io';
 
-import 'package:audio_session/audio_session.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
-import 'package:just_audio_background/just_audio_background.dart';
 
-import 'package:audio_book/core/logger/file_logger.dart';
+import 'package:audio_book/core/player/playback_controller.dart';
 import 'package:audio_book/core/platform/system_share.dart';
 import 'package:audio_book/core/storage/local_library.dart';
 import 'package:audio_book/features/book_detail/book_detail_api.dart';
@@ -22,6 +19,7 @@ class PlayerPage extends StatefulWidget {
     this.directoryPageLinks = const <DirectoryPageLink>[],
     this.loadedDirectoryPages = const <int>{},
     this.initialIndex = 0,
+    this.autoPlay = false,
   });
 
   final String featureKey;
@@ -30,6 +28,7 @@ class PlayerPage extends StatefulWidget {
   final List<DirectoryPageLink> directoryPageLinks;
   final Set<int> loadedDirectoryPages;
   final int initialIndex;
+  final bool autoPlay;
 
   @override
   State<PlayerPage> createState() => _PlayerPageState();
@@ -64,7 +63,7 @@ class _PlayerPageState extends State<PlayerPage> {
   @override
   void initState() {
     super.initState();
-    _player = AudioPlayer();
+    _player = PlaybackController.instance.player;
     _positionSubscription = _player.positionStream.listen((_) {
       _savePlaybackThrottled();
     });
@@ -83,6 +82,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _currentFeatureKey = _extractFeatureKey(episode.playUrl);
       _currentTitle = episode.title;
     }
+    _playAfterLoad = widget.autoPlay;
     _future = _load();
   }
 
@@ -91,7 +91,6 @@ class _PlayerPageState extends State<PlayerPage> {
     _sleepTimer?.cancel();
     _positionSubscription?.cancel();
     _savePlayback();
-    _player.dispose();
     super.dispose();
   }
 
@@ -101,41 +100,13 @@ class _PlayerPageState extends State<PlayerPage> {
       _playerError = null;
     });
 
-    final session = await AudioSession.instance;
-    await session.configure(const AudioSessionConfiguration.speech());
-
-    final info = await _api.fetchPlayInfo(_currentFeatureKey);
-    FileLogger().logPlayHtml(
+    final info = await PlaybackController.instance.loadFeature(
       featureKey: _currentFeatureKey,
-      html: info.rawHtml,
+      fallbackTitle: _pageTitle(),
+      autoPlay: _playAfterLoad,
+      speed: _speed,
     );
-
-    final cache = await _library.downloadCache(info.featureKey);
-    final cachedFile = cache?.isReady == true ? File(cache!.filePath) : null;
-    final audioUri = cachedFile != null && await cachedFile.exists()
-        ? Uri.file(cachedFile.path)
-        : Uri.parse(info.audioUrl);
-
-    await _player.setAudioSource(
-      AudioSource.uri(
-        audioUri,
-        tag: MediaItem(
-          id: info.featureKey,
-          title: _displayTitle(info),
-          album: info.bookName.isEmpty ? null : info.bookName,
-          artUri: info.coverUrl.isEmpty ? null : Uri.tryParse(info.coverUrl),
-        ),
-      ),
-    );
-    await _player.setSpeed(_speed);
-
-    final progress = await _library.chapterProgress(info.featureKey);
-    if (progress != null &&
-        !progress.isPlayed &&
-        progress.position > Duration.zero &&
-        progress.position < (progress.duration - const Duration(seconds: 3))) {
-      await _player.seek(progress.position);
-    }
+    _playAfterLoad = false;
 
     if (mounted) {
       setState(() {
@@ -144,11 +115,6 @@ class _PlayerPageState extends State<PlayerPage> {
       });
     }
     await _savePlayback();
-
-    if (_playAfterLoad) {
-      _playAfterLoad = false;
-      await _player.play();
-    }
 
     return info;
   }
@@ -507,8 +473,8 @@ class _PlayerPageState extends State<PlayerPage> {
                 ),
                 _ToolButton(
                   icon: Icons.keyboard_arrow_down,
-                  label: '收起',
-                  onTap: () => Navigator.of(context).pop(),
+                  label: '最小化',
+                  onTap: _minimizePlayer,
                 ),
               ],
             ),
@@ -865,6 +831,14 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
+  void _minimizePlayer() {
+    final navigator = Navigator.of(context);
+    if (!navigator.canPop()) {
+      return;
+    }
+    navigator.popUntil((route) => route.isFirst);
+  }
+
   void _showSnack(String message) {
     ScaffoldMessenger.of(
       context,
@@ -1009,10 +983,8 @@ class _PlayerPageState extends State<PlayerPage> {
                   loaded ? Icons.check_circle : Icons.radio_button_unchecked,
                 ),
                 title: Text('第 ${link.label} 集'),
-                subtitle: Text(loaded ? '已加载' : '点击加载这个范围'),
-                onTap: loaded
-                    ? () => Navigator.of(context).pop()
-                    : () => Navigator.of(context).pop(link),
+                subtitle: Text(loaded ? '切换到这个范围' : '点击加载这个范围'),
+                onTap: () => Navigator.of(context).pop(link),
               );
             },
           ),
@@ -1022,7 +994,36 @@ class _PlayerPageState extends State<PlayerPage> {
 
     if (selected != null) {
       await _loadDirectoryPage(selected);
+      await _jumpToDirectoryPage(selected);
     }
+  }
+
+  Future<void> _jumpToDirectoryPage(DirectoryPageLink link) async {
+    final index = _firstEpisodeIndexInDirectoryPage(link);
+    if (index < 0) {
+      _showSnack('这个范围还没有可播放章节');
+      return;
+    }
+    await _playEpisodeAt(index);
+  }
+
+  int _firstEpisodeIndexInDirectoryPage(DirectoryPageLink link) {
+    final numbers = RegExp(r'\d+')
+        .allMatches(link.label)
+        .map((match) => int.tryParse(match.group(0) ?? ''))
+        .whereType<int>()
+        .toList();
+    if (numbers.isEmpty) {
+      return -1;
+    }
+    final start = numbers.first;
+    final end = numbers.length > 1 ? numbers.last : numbers.first;
+    final min = start <= end ? start : end;
+    final max = start <= end ? end : start;
+    return _episodes.indexWhere((episode) {
+      final number = _episodeNumber(episode);
+      return number >= min && number <= max;
+    });
   }
 
   DirectoryPageLink? get _nextDirectoryPageLink {

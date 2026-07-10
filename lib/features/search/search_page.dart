@@ -9,9 +9,10 @@ import 'package:audio_book/features/search/search_api.dart';
 import 'package:audio_book/features/search/search_models.dart';
 
 class SearchPage extends StatefulWidget {
-  const SearchPage({super.key, this.query = ''});
+  const SearchPage({super.key, this.query = '', this.embedded = false});
 
   final String query;
+  final bool embedded;
 
   @override
   State<SearchPage> createState() => _SearchPageState();
@@ -59,9 +60,9 @@ class _SearchPageState extends State<SearchPage> {
           ],
         ),
       ),
-      bottomNavigationBar: _SearchBottomBar(
-        onHome: () => Navigator.of(context).pop(),
-      ),
+      bottomNavigationBar: widget.embedded
+          ? null
+          : _SearchBottomBar(onHome: () => Navigator.of(context).pop()),
     );
   }
 
