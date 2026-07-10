@@ -44,6 +44,9 @@ dependencies:
   just_audio: ^0.10.5
   just_audio_background: ^0.0.1-beta.17
   audio_session: ^0.2.3
+  flutter_animate: ^4.5.2
+  animations: ^2.2.0
+  rive: ^0.14.9
 
 dev_dependencies:
   flutter_test:

@@ -371,7 +371,7 @@ class PlayerApi {
         options: Options(
           responseType: ResponseType.plain,
           validateStatus: (status) => status != null && status < 500,
-          followRedirects: true,
+          followRedirects: false,
           headers: {
             ...SiteConfig.mobileHeaders,
             'Referer': '$_baseUrl$_loginPath',
@@ -388,6 +388,10 @@ class PlayerApi {
       }
 
       if (_isLoggedInHtml(text)) {
+        return const LoginResult(success: true, message: '登录成功');
+      }
+
+      if (_isLoggedInRedirect(response)) {
         return const LoginResult(success: true, message: '登录成功');
       }
 
@@ -430,10 +434,30 @@ class PlayerApi {
 
   bool _isLoggedInHtml(String text) {
     final cookie = _client.cookie ?? '';
-    return cookie.contains('PTCMS_userid=') ||
-        cookie.contains('PTCMS_token=') ||
+    return _hasLoginCookie(cookie) ||
         text.contains('登录成功') ||
         text.toLowerCase().contains('success');
+  }
+
+  bool _isLoggedInRedirect(Response<String> response) {
+    final statusCode = response.statusCode ?? 0;
+    if (statusCode < 300 || statusCode >= 400) {
+      return false;
+    }
+    final cookie = _client.cookie ?? '';
+    if (_hasLoginCookie(cookie)) {
+      return true;
+    }
+    final location = response.headers.value('location') ?? '';
+    return location.isNotEmpty &&
+        !location.contains('/user/public/login') &&
+        !location.contains('/user/public/register');
+  }
+
+  bool _hasLoginCookie(String cookie) {
+    return cookie.contains('PTCMS_userid=') ||
+        cookie.contains('PTCMS_token=') ||
+        cookie.contains('PTCMS_username=');
   }
 
   Future<LoginResult> sendRegisterCode({required String email}) async {

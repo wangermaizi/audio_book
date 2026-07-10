@@ -1,6 +1,8 @@
 import 'dart:ui';
 
+import 'package:animations/animations.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 
 import 'package:audio_book/core/network/api_client.dart';
 import 'package:audio_book/core/player/playback_controller.dart';
@@ -31,9 +33,12 @@ class _HomePageState extends State<HomePage> {
   bool _checkingUpdate = false;
   bool _autoUpdateChecked = false;
   PlaybackRecord? _latestPlayback;
+  PlaybackRecord? _playerShellRecord;
   int _selectedIndex = 0;
   String _searchQuery = '';
   int _searchPageVersion = 0;
+  bool _playerExpanded = false;
+  int _playerShellVersion = 0;
 
   static const List<String> _categories = <String>[
     '全部',
@@ -62,54 +67,86 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final latest = _latestPlayback;
-    return Scaffold(
-      body: SafeArea(
-        bottom: false,
-        child: IndexedStack(
-          index: _selectedIndex,
+    return PopScope(
+      canPop: !_playerExpanded,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _playerExpanded) {
+          _collapsePlayer();
+        }
+      },
+      child: Scaffold(
+        body: Stack(
           children: [
-            _buildHomeContent(),
-            SearchPage(
-              key: ValueKey('$_searchQuery-$_searchPageVersion'),
-              query: _searchQuery,
-              embedded: true,
+            SafeArea(
+              bottom: false,
+              child: IndexedStack(
+                index: _selectedIndex,
+                children: [
+                  _buildHomeContent(),
+                  SearchPage(
+                    key: ValueKey('$_searchQuery-$_searchPageVersion'),
+                    query: _searchQuery,
+                    embedded: true,
+                  ),
+                  _BookshelfPage(onOpenBook: _openBook),
+                  _MinePage(
+                    onCheckUpdate: () =>
+                        _checkForUpdate(silentWhenLatest: false),
+                    onOpenPlayback: _openPlayback,
+                  ),
+                ],
+              ),
             ),
-            _BookshelfPage(onOpenBook: _openBook),
-            _MinePage(
-              onCheckUpdate: () => _checkForUpdate(silentWhenLatest: false),
-              onOpenPlayback: _openPlayback,
-            ),
+            if (!_playerExpanded)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _HomeBottomBar(
+                  activeIndex: _selectedIndex,
+                  miniFeatureKey: latest?.featureKey ?? '',
+                  miniTitle: latest?.bookName ?? '',
+                  miniSubtitle: latest == null
+                      ? ''
+                      : '继续收听 ${latest.title} · ${_progressText(latest)}',
+                  miniCoverUrl: latest?.coverUrl ?? '',
+                  onHome: () => _selectTab(0),
+                  onSearch: () => _openSearch(),
+                  onShelf: () => _selectTab(2),
+                  onMine: () => _selectTab(3),
+                  onMiniOpen: latest == null
+                      ? null
+                      : () => _openPlayback(latest),
+                  onMiniPlay: latest == null
+                      ? null
+                      : () async {
+                          try {
+                            await PlaybackController.instance.playRecord(
+                              latest,
+                            );
+                            await _loadLatestPlayback();
+                          } catch (error) {
+                            if (!context.mounted) {
+                              return;
+                            }
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('播放失败：$error')),
+                            );
+                          }
+                        },
+                  miniProgress: latest?.progress.clamp(0, 1) ?? 0,
+                ),
+              ),
+            if (_playerExpanded && _playerShellRecord != null)
+              _PlayerShellOverlay(
+                key: ValueKey(
+                  '${_playerShellRecord!.featureKey}-$_playerShellVersion',
+                ),
+                record: _playerShellRecord!,
+                onCollapse: _collapsePlayer,
+              ),
           ],
         ),
-      ),
-      bottomNavigationBar: _HomeBottomBar(
-        activeIndex: _selectedIndex,
-        miniTitle: latest?.bookName ?? '',
-        miniSubtitle: latest == null
-            ? ''
-            : '继续收听 ${latest.title} · ${_progressText(latest)}',
-        miniCoverUrl: latest?.coverUrl ?? '',
-        onHome: () => _selectTab(0),
-        onSearch: () => _openSearch(),
-        onShelf: () => _selectTab(2),
-        onMine: () => _selectTab(3),
-        onMiniOpen: latest == null ? null : () => _openPlayback(latest),
-        onMiniPlay: latest == null
-            ? null
-            : () async {
-                try {
-                  await PlaybackController.instance.playRecord(latest);
-                  await _loadLatestPlayback();
-                } catch (error) {
-                  if (!context.mounted) {
-                    return;
-                  }
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(SnackBar(content: Text('播放失败：$error')));
-                }
-              },
-        miniProgress: latest?.progress.clamp(0, 1) ?? 0,
       ),
     );
   }
@@ -533,17 +570,16 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _openPlayback(PlaybackRecord record, {bool autoPlay = false}) {
-    Navigator.of(context)
-        .push(
-          MaterialPageRoute(
-            builder: (_) => PlayerPage(
-              featureKey: record.featureKey,
-              title: record.title,
-              autoPlay: autoPlay,
-            ),
-          ),
-        )
-        .then((_) => _loadLatestPlayback());
+    setState(() {
+      _playerShellRecord = record;
+      _playerExpanded = true;
+      _playerShellVersion++;
+    });
+  }
+
+  Future<void> _collapsePlayer() async {
+    setState(() => _playerExpanded = false);
+    await _loadLatestPlayback();
   }
 
   String _progressText(PlaybackRecord record) {
@@ -873,9 +909,72 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
+class _PlayerShellOverlay extends StatelessWidget {
+  const _PlayerShellOverlay({
+    super.key,
+    required this.record,
+    required this.onCollapse,
+  });
+
+  final PlaybackRecord record;
+  final Future<void> Function() onCollapse;
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: GestureDetector(
+        onVerticalDragEnd: (details) {
+          final velocity = details.primaryVelocity ?? 0;
+          if (velocity > 480) {
+            onCollapse();
+          }
+        },
+        child:
+            PageTransitionSwitcher(
+              duration: const Duration(milliseconds: 320),
+              reverse: false,
+              transitionBuilder: (child, animation, secondaryAnimation) {
+                return SharedAxisTransition(
+                  animation: animation,
+                  secondaryAnimation: secondaryAnimation,
+                  transitionType: SharedAxisTransitionType.vertical,
+                  fillColor: const Color(0xFFF4F8FD),
+                  child: child,
+                );
+              },
+              child: DecoratedBox(
+                key: ValueKey(record.featureKey),
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Color(0xFFF4F8FD), Color(0xFFFFFFFF)],
+                  ),
+                ),
+                child: PlayerPage(
+                  featureKey: record.featureKey,
+                  title: record.title,
+                  embedded: true,
+                  onMinimize: () {
+                    onCollapse();
+                  },
+                ),
+              ),
+            ).animate().slideY(
+              begin: 1,
+              end: 0,
+              duration: 360.ms,
+              curve: Curves.easeOutCubic,
+            ),
+      ),
+    );
+  }
+}
+
 class _HomeBottomBar extends StatelessWidget {
   const _HomeBottomBar({
     required this.activeIndex,
+    required this.miniFeatureKey,
     required this.miniTitle,
     required this.miniSubtitle,
     required this.miniCoverUrl,
@@ -889,6 +988,7 @@ class _HomeBottomBar extends StatelessWidget {
   });
 
   final int activeIndex;
+  final String miniFeatureKey;
   final String miniTitle;
   final String miniSubtitle;
   final String miniCoverUrl;
@@ -916,11 +1016,14 @@ class _HomeBottomBar extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (miniTitle.isNotEmpty)
-                  LinearProgressIndicator(
-                    value: miniProgress <= 0 ? null : miniProgress,
-                    minHeight: 3,
-                    backgroundColor: const Color(0xFFEAF4FF),
-                    color: Theme.of(context).colorScheme.primary,
+                  Hero(
+                    tag: 'player-progress-$miniFeatureKey',
+                    child: LinearProgressIndicator(
+                      value: miniProgress <= 0 ? null : miniProgress,
+                      minHeight: 3,
+                      backgroundColor: const Color(0xFFEAF4FF),
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
                   ),
                 if (miniTitle.isNotEmpty)
                   Padding(
@@ -928,52 +1031,73 @@ class _HomeBottomBar extends StatelessWidget {
                     child: InkWell(
                       borderRadius: BorderRadius.circular(16),
                       onTap: onMiniOpen,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 2),
-                        child: Row(
-                          children: [
-                            ClipOval(
-                              child: SizedBox(
-                                width: 42,
-                                height: 42,
-                                child: _NetworkImage(
-                                  url: miniCoverUrl,
-                                  fit: BoxFit.cover,
+                      child:
+                          Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 2,
                                 ),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    miniTitle,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w900,
+                                child: Row(
+                                  children: [
+                                    Hero(
+                                      tag: 'player-cover-$miniFeatureKey',
+                                      child: ClipOval(
+                                        child: SizedBox(
+                                          width: 42,
+                                          height: 42,
+                                          child: _NetworkImage(
+                                            url: miniCoverUrl,
+                                            fit: BoxFit.cover,
+                                          ),
+                                        ),
+                                      ),
                                     ),
-                                  ),
-                                  Text(
-                                    miniSubtitle,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: Color(0xFF59606A),
-                                      fontSize: 12,
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Hero(
+                                            tag: 'player-title-$miniFeatureKey',
+                                            child: Material(
+                                              color: Colors.transparent,
+                                              child: Text(
+                                                miniTitle,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  fontWeight: FontWeight.w900,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                          Text(
+                                            miniSubtitle,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              color: Color(0xFF59606A),
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                    IconButton.filled(
+                                      onPressed: onMiniPlay,
+                                      icon: const Icon(Icons.play_arrow),
+                                    ),
+                                  ],
+                                ),
+                              )
+                              .animate()
+                              .fadeIn(duration: 180.ms)
+                              .slideY(
+                                begin: 0.08,
+                                end: 0,
+                                duration: 220.ms,
+                                curve: Curves.easeOutCubic,
                               ),
-                            ),
-                            IconButton.filled(
-                              onPressed: onMiniPlay,
-                              icon: const Icon(Icons.play_arrow),
-                            ),
-                          ],
-                        ),
-                      ),
                     ),
                   ),
                 Row(

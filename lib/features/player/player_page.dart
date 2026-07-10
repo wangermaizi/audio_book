@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 import 'package:just_audio/just_audio.dart';
 
 import 'package:audio_book/core/player/playback_controller.dart';
@@ -20,6 +21,8 @@ class PlayerPage extends StatefulWidget {
     this.loadedDirectoryPages = const <int>{},
     this.initialIndex = 0,
     this.autoPlay = false,
+    this.embedded = false,
+    this.onMinimize,
   });
 
   final String featureKey;
@@ -29,6 +32,8 @@ class PlayerPage extends StatefulWidget {
   final Set<int> loadedDirectoryPages;
   final int initialIndex;
   final bool autoPlay;
+  final bool embedded;
+  final VoidCallback? onMinimize;
 
   @override
   State<PlayerPage> createState() => _PlayerPageState();
@@ -128,7 +133,13 @@ class _PlayerPageState extends State<PlayerPage> {
       episodes: _episodes,
       currentIndex: _currentIndex,
     );
+    if (_episodes.isEmpty && info.bookId.isNotEmpty && mounted) {
+      setState(() => _loadingEpisodes = true);
+    }
     final restoredContext = await _restoreEpisodeContextIfNeeded(info);
+    if (mounted) {
+      setState(() => _loadingEpisodes = false);
+    }
     if (restoredContext) {
       info = await PlaybackController.instance.loadFeature(
         featureKey: _currentFeatureKey,
@@ -293,6 +304,14 @@ class _PlayerPageState extends State<PlayerPage> {
 
   @override
   Widget build(BuildContext context) {
+    final body = _buildBody(context);
+    if (widget.embedded) {
+      return ColoredBox(
+        color: const Color(0xFFF4F8FD),
+        child: SafeArea(bottom: false, child: body),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('正在播放'),
@@ -303,59 +322,97 @@ class _PlayerPageState extends State<PlayerPage> {
           ),
         ],
       ),
-      body: FutureBuilder<PlayerInfo>(
-        future: _future,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            if (snapshot.error is LoginRequiredException &&
-                _loginSheetShownForFeatureKey != _currentFeatureKey) {
-              _loginSheetShownForFeatureKey = _currentFeatureKey;
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) {
-                  _showLoginSheet();
-                }
-              });
-            }
-            return _ErrorView(
-              error: snapshot.error,
-              onRetry: _retry,
-              onLogin: snapshot.error is LoginRequiredException
-                  ? _showLoginSheet
-                  : null,
-            );
-          }
+      body: body,
+    );
+  }
 
-          final info = snapshot.data ?? _info;
-          if (info == null) {
-            return _ErrorView(error: '没有播放数据', onRetry: _retry);
-          }
-
-          return ListView(
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+  Widget _buildBody(BuildContext context) {
+    return FutureBuilder<PlayerInfo>(
+      future: _future,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return Column(
             children: [
-              _buildNowPlaying(context, info),
-              const SizedBox(height: 22),
-              _buildControls(context),
-              if (_episodes.isNotEmpty) ...[
-                const SizedBox(height: 18),
-                _buildPlaylist(context),
-              ],
-              if (_playerError != null) ...[
-                const SizedBox(height: 14),
-                Text(
-                  _playerError!,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(color: Colors.red),
-                  textAlign: TextAlign.center,
-                ),
-              ],
+              if (widget.embedded) _buildEmbeddedHeader(),
+              const Expanded(child: Center(child: CircularProgressIndicator())),
             ],
           );
-        },
+        }
+        if (snapshot.hasError) {
+          if (snapshot.error is LoginRequiredException &&
+              _loginSheetShownForFeatureKey != _currentFeatureKey) {
+            _loginSheetShownForFeatureKey = _currentFeatureKey;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) {
+                _showLoginSheet();
+              }
+            });
+          }
+          return _ErrorView(
+            error: snapshot.error,
+            onRetry: _retry,
+            onLogin: snapshot.error is LoginRequiredException
+                ? _showLoginSheet
+                : null,
+          );
+        }
+
+        final info = snapshot.data ?? _info;
+        if (info == null) {
+          return _ErrorView(error: '没有播放数据', onRetry: _retry);
+        }
+
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+          children: [
+            if (widget.embedded) ...[
+              _buildEmbeddedHeader(),
+              const SizedBox(height: 10),
+            ],
+            _buildNowPlaying(context, info),
+            const SizedBox(height: 22),
+            _buildControls(context),
+            const SizedBox(height: 18),
+            _buildPlaylistSection(context),
+            if (_playerError != null) ...[
+              const SizedBox(height: 14),
+              Text(
+                _playerError!,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: Colors.red),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildEmbeddedHeader() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 4, 4, 0),
+      child: Row(
+        children: [
+          IconButton.filledTonal(
+            tooltip: '最小化',
+            onPressed: _minimizePlayer,
+            icon: const Icon(Icons.keyboard_arrow_down),
+          ),
+          const Expanded(
+            child: Text(
+              '正在播放',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+            ),
+          ),
+          IconButton.filledTonal(
+            tooltip: '分享',
+            onPressed: _info == null ? null : _shareCurrent,
+            icon: const Icon(Icons.share_outlined),
+          ),
+        ],
       ),
     );
   }
@@ -366,48 +423,65 @@ class _PlayerPageState extends State<PlayerPage> {
 
     return Column(
       children: [
-        SizedBox(
-          width: 260,
-          height: 260,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.16),
-                  blurRadius: 42,
-                  offset: const Offset(0, 24),
-                ),
-              ],
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(10),
-              child: ClipOval(
-                child: info.coverUrl.isEmpty
-                    ? const ColoredBox(
-                        color: Color(0xFFF0F4F8),
-                        child: Icon(Icons.graphic_eq, size: 96),
-                      )
-                    : Image.network(
-                        info.coverUrl,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, _, _) => const ColoredBox(
-                          color: Color(0xFFF0F4F8),
-                          child: Icon(Icons.graphic_eq, size: 96),
-                        ),
+        Hero(
+              tag: 'player-cover-${info.featureKey}',
+              child: SizedBox(
+                width: 260,
+                height: 260,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.16),
+                        blurRadius: 42,
+                        offset: const Offset(0, 24),
                       ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: ClipOval(
+                      child: info.coverUrl.isEmpty
+                          ? const ColoredBox(
+                              color: Color(0xFFF0F4F8),
+                              child: Icon(Icons.graphic_eq, size: 96),
+                            )
+                          : Image.network(
+                              info.coverUrl,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) => const ColoredBox(
+                                color: Color(0xFFF0F4F8),
+                                child: Icon(Icons.graphic_eq, size: 96),
+                              ),
+                            ),
+                    ),
+                  ),
+                ),
               ),
+            )
+            .animate()
+            .fadeIn(duration: 260.ms)
+            .scaleXY(
+              begin: 0.96,
+              end: 1,
+              duration: 340.ms,
+              curve: Curves.easeOutCubic,
+            ),
+        const SizedBox(height: 34),
+        Hero(
+          tag: 'player-title-${info.featureKey}',
+          child: Material(
+            color: Colors.transparent,
+            child: Text(
+              title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900),
             ),
           ),
-        ),
-        const SizedBox(height: 34),
-        Text(
-          title,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900),
         ),
         if (bookName.isNotEmpty) ...[
           const SizedBox(height: 8),
@@ -598,8 +672,8 @@ class _PlayerPageState extends State<PlayerPage> {
                 ),
                 _ToolButton(
                   icon: Icons.queue_music,
-                  label: '播放队列',
-                  onTap: _episodes.isEmpty ? null : _showPlaylistSheet,
+                  label: _loadingEpisodes ? '加载队列' : '播放队列',
+                  onTap: _canOpenPlaylist ? _openPlaylistFromTool : null,
                 ),
                 _ToolButton(
                   icon: Icons.keyboard_arrow_down,
@@ -607,6 +681,75 @@ class _PlayerPageState extends State<PlayerPage> {
                   onTap: _minimizePlayer,
                 ),
               ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPlaylistSection(BuildContext context) {
+    if (_episodes.isNotEmpty) {
+      return _buildPlaylist(context);
+    }
+    return _buildPlaylistPlaceholder(context);
+  }
+
+  Widget _buildPlaylistPlaceholder(BuildContext context) {
+    final canRestore = _info?.bookId.isNotEmpty ?? false;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 24,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
+        child: Row(
+          children: [
+            CircleAvatar(
+              radius: 22,
+              backgroundColor: const Color(0xFFEAF4FF),
+              child: _loadingEpisodes
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.queue_music, color: Color(0xFF2E9AF2)),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '播放队列',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _loadingEpisodes
+                        ? '正在恢复章节目录...'
+                        : (canRestore
+                              ? '点击加载同书章节后可切换上一集/下一集'
+                              : '当前播放信息暂未包含书籍目录'),
+                    style: const TextStyle(color: Color(0xFF59606A)),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+            FilledButton.tonal(
+              onPressed: _loadingEpisodes || !canRestore
+                  ? null
+                  : _restorePlaylistContext,
+              child: const Text('加载'),
             ),
           ],
         ),
@@ -718,6 +861,19 @@ class _PlayerPageState extends State<PlayerPage> {
         ),
       ),
     );
+  }
+
+  bool get _canOpenPlaylist =>
+      _episodes.isNotEmpty || (_info?.bookId.isNotEmpty ?? false);
+
+  Future<void> _openPlaylistFromTool() async {
+    if (_episodes.isEmpty) {
+      final restored = await _restorePlaylistContext();
+      if (!restored) {
+        return;
+      }
+    }
+    await _showPlaylistSheet();
   }
 
   Future<void> _showSpeedPicker() async {
@@ -1052,6 +1208,11 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   void _minimizePlayer() {
+    final onMinimize = widget.onMinimize;
+    if (onMinimize != null) {
+      onMinimize();
+      return;
+    }
     final navigator = Navigator.of(context);
     if (!navigator.canPop()) {
       return;
@@ -1171,6 +1332,53 @@ class _PlayerPageState extends State<PlayerPage> {
       _playerError = null;
       _future = _load();
     });
+  }
+
+  Future<bool> _restorePlaylistContext() async {
+    if (_episodes.isNotEmpty) {
+      return true;
+    }
+    final info = _info;
+    if (info == null || info.bookId.isEmpty) {
+      _showSnack('当前播放信息暂未包含书籍目录');
+      return false;
+    }
+    if (_loadingEpisodes) {
+      return false;
+    }
+
+    setState(() => _loadingEpisodes = true);
+    try {
+      final restored = await _restoreEpisodeContextIfNeeded(info);
+      if (!restored || _episodes.isEmpty) {
+        _showSnack('没有恢复到可切换的章节目录');
+        return false;
+      }
+
+      final nextInfo = await PlaybackController.instance.loadFeature(
+        featureKey: _currentFeatureKey,
+        fallbackTitle: _pageTitle(),
+        autoPlay: _player.playing,
+        speed: _speed,
+        episodes: _episodes,
+        currentIndex: _currentIndex,
+      );
+      if (mounted) {
+        setState(() {
+          _info = nextInfo;
+          _audioReady = true;
+          _playerError = null;
+        });
+      }
+      return true;
+    } catch (error) {
+      _showSnack('加载播放队列失败：$error');
+      return false;
+    } finally {
+      if (mounted) {
+        setState(() => _loadingEpisodes = false);
+      }
+    }
   }
 
   int _normalizedInitialIndex() {
