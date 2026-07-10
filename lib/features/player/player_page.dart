@@ -119,14 +119,26 @@ class _PlayerPageState extends State<PlayerPage> {
       _playerError = null;
     });
 
-    final info = await PlaybackController.instance.loadFeature(
+    final shouldPlayAfterLoad = _playAfterLoad || _player.playing;
+    var info = await PlaybackController.instance.loadFeature(
       featureKey: _currentFeatureKey,
       fallbackTitle: _pageTitle(),
-      autoPlay: _playAfterLoad,
+      autoPlay: shouldPlayAfterLoad,
       speed: _speed,
       episodes: _episodes,
       currentIndex: _currentIndex,
     );
+    final restoredContext = await _restoreEpisodeContextIfNeeded(info);
+    if (restoredContext) {
+      info = await PlaybackController.instance.loadFeature(
+        featureKey: _currentFeatureKey,
+        fallbackTitle: _pageTitle(),
+        autoPlay: shouldPlayAfterLoad || _player.playing,
+        speed: _speed,
+        episodes: _episodes,
+        currentIndex: _currentIndex,
+      );
+    }
     _playAfterLoad = false;
 
     if (mounted) {
@@ -139,6 +151,64 @@ class _PlayerPageState extends State<PlayerPage> {
     await _savePlayback();
 
     return info;
+  }
+
+  Future<bool> _restoreEpisodeContextIfNeeded(PlayerInfo info) async {
+    if (_episodes.isNotEmpty || info.bookId.isEmpty) {
+      return false;
+    }
+    try {
+      final detail = await _bookDetailApi.fetchDetail(info.bookId);
+      final seen = <String>{};
+      _episodes
+        ..clear()
+        ..addAll(detail.episodes.where((episode) => seen.add(episode.playUrl)));
+      _directoryPageLinks = List<DirectoryPageLink>.of(
+        detail.directoryPageLinks,
+      )..sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+      _loadedDirectoryPages
+        ..clear()
+        ..add(1);
+
+      var index = _indexOfFeatureKey(info.featureKey);
+      for (final link in _directoryPageLinks) {
+        if (index >= 0) {
+          break;
+        }
+        if (_loadedDirectoryPages.contains(link.pageNumber)) {
+          continue;
+        }
+        final data = await _bookDetailApi.fetchDirectoryPageData(link.url);
+        for (final episode in data.episodes) {
+          if (seen.add(episode.playUrl)) {
+            _episodes.add(episode);
+          }
+        }
+        _episodes.sort(
+          (a, b) => _episodeNumber(a).compareTo(_episodeNumber(b)),
+        );
+        _loadedDirectoryPages.add(link.pageNumber);
+        _mergeDirectoryPageLinks(data.pageLinks);
+        index = _indexOfFeatureKey(info.featureKey);
+      }
+
+      if (index < 0) {
+        return false;
+      }
+      _currentIndex = index;
+      _currentFeatureKey = info.featureKey;
+      _currentTitle = _episodes[index].title;
+      return true;
+    } catch (error) {
+      debugPrint('Restore playback context failed: $error');
+      return false;
+    }
+  }
+
+  int _indexOfFeatureKey(String featureKey) {
+    return _episodes.indexWhere((episode) {
+      return _extractFeatureKey(episode.playUrl) == featureKey;
+    });
   }
 
   Future<void> _loadSkipSettings() async {
@@ -1195,36 +1265,113 @@ class _PlayerPageState extends State<PlayerPage> {
 
     if (selected != null) {
       await _loadDirectoryPage(selected);
-      await _jumpToDirectoryPage(selected);
+      await _showDirectoryEpisodePicker(selected);
     }
   }
 
-  Future<void> _jumpToDirectoryPage(DirectoryPageLink link) async {
-    final index = _firstEpisodeIndexInDirectoryPage(link);
-    if (index < 0) {
+  Future<void> _showDirectoryEpisodePicker(DirectoryPageLink link) async {
+    final indexes = _episodeIndexesInDirectoryPage(link);
+    if (indexes.isEmpty) {
       _showSnack('这个范围还没有可播放章节');
       return;
     }
-    await _playEpisodeAt(index);
+    final selectedIndex = await showModalBottomSheet<int>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: SizedBox(
+            height: MediaQuery.sizeOf(context).height * 0.68,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 0, 18, 10),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '第 ${link.label} 集',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                      Text('${indexes.length} 集'),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: ListView.separated(
+                    itemCount: indexes.length,
+                    separatorBuilder: (context, index) =>
+                        const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final episodeIndex = indexes[index];
+                      final episode = _episodes[episodeIndex];
+                      final selected = episodeIndex == _currentIndex;
+                      return ListTile(
+                        leading: selected
+                            ? Icon(
+                                Icons.volume_up,
+                                color: Theme.of(context).colorScheme.primary,
+                              )
+                            : CircleAvatar(
+                                radius: 16,
+                                backgroundColor: const Color(0xFFF0F2F4),
+                                child: Text('${_episodeNumber(episode)}'),
+                              ),
+                        title: Text(
+                          episode.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: selected
+                              ? TextStyle(
+                                  color: Theme.of(context).colorScheme.primary,
+                                  fontWeight: FontWeight.w900,
+                                )
+                              : null,
+                        ),
+                        onTap: selected
+                            ? null
+                            : () => Navigator.of(context).pop(episodeIndex),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (selectedIndex != null) {
+      await _playEpisodeAt(selectedIndex);
+    }
   }
 
-  int _firstEpisodeIndexInDirectoryPage(DirectoryPageLink link) {
+  List<int> _episodeIndexesInDirectoryPage(DirectoryPageLink link) {
     final numbers = RegExp(r'\d+')
         .allMatches(link.label)
         .map((match) => int.tryParse(match.group(0) ?? ''))
         .whereType<int>()
         .toList();
     if (numbers.isEmpty) {
-      return -1;
+      return const <int>[];
     }
     final start = numbers.first;
     final end = numbers.length > 1 ? numbers.last : numbers.first;
     final min = start <= end ? start : end;
     final max = start <= end ? end : start;
-    return _episodes.indexWhere((episode) {
-      final number = _episodeNumber(episode);
-      return number >= min && number <= max;
-    });
+    final indexes = <int>[];
+    for (var i = 0; i < _episodes.length; i++) {
+      final number = _episodeNumber(_episodes[i]);
+      if (number >= min && number <= max) {
+        indexes.add(i);
+      }
+    }
+    return indexes;
   }
 
   DirectoryPageLink? get _nextDirectoryPageLink {

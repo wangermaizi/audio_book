@@ -67,6 +67,7 @@ class PlayerApi {
 
     return PlayerInfo(
       featureKey: featureKey,
+      bookId: novelId,
       title: title,
       bookName: bookName,
       coverUrl: coverUrl,
@@ -552,6 +553,7 @@ class LoginResult {
 class PlayerInfo {
   const PlayerInfo({
     required this.featureKey,
+    required this.bookId,
     required this.title,
     required this.bookName,
     required this.coverUrl,
@@ -562,6 +564,7 @@ class PlayerInfo {
   });
 
   final String featureKey;
+  final String bookId;
   final String title;
   final String bookName;
   final String coverUrl;
