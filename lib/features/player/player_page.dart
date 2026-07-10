@@ -43,6 +43,10 @@ class _PlayerPageState extends State<PlayerPage> {
   final SystemShare _share = SystemShare();
 
   PlayerInfo? _info;
+  PlaybackSkipSettings _skipSettings = const PlaybackSkipSettings(
+    intro: Duration.zero,
+    outro: Duration.zero,
+  );
   double _speed = 1;
   bool _audioReady = false;
   bool _playAfterLoad = false;
@@ -52,7 +56,10 @@ class _PlayerPageState extends State<PlayerPage> {
   Timer? _sleepTimer;
   DateTime? _sleepEndsAt;
   StreamSubscription<Duration>? _positionSubscription;
+  StreamSubscription<int?>? _currentIndexSubscription;
+  StreamSubscription<PlayerState>? _playerStateSubscription;
   DateTime? _lastProgressSaveAt;
+  bool _autoAdvancing = false;
   late int _currentIndex;
   late String _currentFeatureKey;
   late String _currentTitle;
@@ -66,6 +73,7 @@ class _PlayerPageState extends State<PlayerPage> {
     _player = PlaybackController.instance.player;
     _positionSubscription = _player.positionStream.listen((_) {
       _savePlaybackThrottled();
+      _autoSkipOutroIfNeeded();
     });
     _episodes = List<BookEpisode>.of(widget.episodes);
     _directoryPageLinks = List<DirectoryPageLink>.of(widget.directoryPageLinks)
@@ -82,7 +90,16 @@ class _PlayerPageState extends State<PlayerPage> {
       _currentFeatureKey = _extractFeatureKey(episode.playUrl);
       _currentTitle = episode.title;
     }
+    _currentIndexSubscription = _player.currentIndexStream.listen((_) {
+      _syncFromSystemPlayback();
+    });
+    _playerStateSubscription = _player.playerStateStream.listen((state) {
+      if (state.processingState == ProcessingState.completed) {
+        _playNextWhenCurrentCompleted();
+      }
+    });
     _playAfterLoad = widget.autoPlay;
+    _loadSkipSettings();
     _future = _load();
   }
 
@@ -90,6 +107,8 @@ class _PlayerPageState extends State<PlayerPage> {
   void dispose() {
     _sleepTimer?.cancel();
     _positionSubscription?.cancel();
+    _currentIndexSubscription?.cancel();
+    _playerStateSubscription?.cancel();
     _savePlayback();
     super.dispose();
   }
@@ -105,6 +124,8 @@ class _PlayerPageState extends State<PlayerPage> {
       fallbackTitle: _pageTitle(),
       autoPlay: _playAfterLoad,
       speed: _speed,
+      episodes: _episodes,
+      currentIndex: _currentIndex,
     );
     _playAfterLoad = false;
 
@@ -114,9 +135,17 @@ class _PlayerPageState extends State<PlayerPage> {
         _audioReady = true;
       });
     }
+    await _skipIntroIfNeeded();
     await _savePlayback();
 
     return info;
+  }
+
+  Future<void> _loadSkipSettings() async {
+    final settings = await _library.playbackSkipSettings();
+    if (mounted) {
+      setState(() => _skipSettings = settings);
+    }
   }
 
   Future<void> _retry() async {
@@ -127,6 +156,31 @@ class _PlayerPageState extends State<PlayerPage> {
       _playerError = null;
       _future = _load();
     });
+  }
+
+  void _syncFromSystemPlayback() {
+    final featureKey = PlaybackController.instance.currentFeatureKey;
+    if (featureKey == null || featureKey == _currentFeatureKey) {
+      return;
+    }
+    final index = _episodes.indexWhere((episode) {
+      return _extractFeatureKey(episode.playUrl) == featureKey;
+    });
+    if (index < 0 || !mounted) {
+      return;
+    }
+    final info = PlaybackController.instance.currentInfo;
+    setState(() {
+      _currentIndex = index;
+      _currentFeatureKey = featureKey;
+      _currentTitle = _episodes[index].title;
+      if (info != null) {
+        _info = info;
+        _audioReady = true;
+      }
+      _playerError = null;
+    });
+    _savePlayback();
   }
 
   Future<void> _showLoginSheet() async {
@@ -453,8 +507,9 @@ class _PlayerPageState extends State<PlayerPage> {
               ],
             ),
             const SizedBox(height: 22),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
+            Wrap(
+              alignment: WrapAlignment.spaceAround,
+              runSpacing: 14,
               children: [
                 _ToolButton(
                   icon: Icons.speed,
@@ -465,6 +520,11 @@ class _PlayerPageState extends State<PlayerPage> {
                   icon: Icons.timer_outlined,
                   label: _sleepTimer == null ? '睡眠定时' : '已定时',
                   onTap: _showSleepTimerPicker,
+                ),
+                _ToolButton(
+                  icon: Icons.content_cut,
+                  label: _skipSettingsLabel(),
+                  onTap: _showSkipSettingsSheet,
                 ),
                 _ToolButton(
                   icon: Icons.queue_music,
@@ -687,6 +747,96 @@ class _PlayerPageState extends State<PlayerPage> {
     }
   }
 
+  Future<void> _showSkipSettingsSheet() async {
+    var introSeconds = _skipSettings.intro.inSeconds;
+    var outroSeconds = _skipSettings.outro.inSeconds;
+    final settings = await showModalBottomSheet<PlaybackSkipSettings>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(22, 8, 22, 22),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '跳过片头片尾',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    _SkipStepper(
+                      title: '每集开头跳过',
+                      seconds: introSeconds,
+                      onChanged: (value) {
+                        setSheetState(() => introSeconds = value);
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    _SkipStepper(
+                      title: '每集结尾跳过',
+                      seconds: outroSeconds,
+                      onChanged: (value) {
+                        setSheetState(() => outroSeconds = value);
+                      },
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () {
+                              Navigator.of(context).pop(
+                                const PlaybackSkipSettings(
+                                  intro: Duration.zero,
+                                  outro: Duration.zero,
+                                ),
+                              );
+                            },
+                            child: const Text('清空'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: () {
+                              Navigator.of(context).pop(
+                                PlaybackSkipSettings(
+                                  intro: Duration(seconds: introSeconds),
+                                  outro: Duration(seconds: outroSeconds),
+                                ),
+                              );
+                            },
+                            child: const Text('保存'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    if (settings == null) {
+      return;
+    }
+    await _library.savePlaybackSkipSettings(settings);
+    if (mounted) {
+      setState(() => _skipSettings = settings);
+      _showSnack('已保存跳过设置');
+    }
+  }
+
   Duration get _remainingDuration {
     final duration = _player.duration ?? Duration.zero;
     final position = _player.position;
@@ -857,6 +1007,57 @@ class _PlayerPageState extends State<PlayerPage> {
       return;
     }
     await _player.seek(next);
+  }
+
+  Future<void> _skipIntroIfNeeded() async {
+    if (!_skipSettings.hasIntro || !_audioReady) {
+      return;
+    }
+    final duration = _player.duration ?? Duration.zero;
+    if (duration > Duration.zero && _skipSettings.intro >= duration) {
+      return;
+    }
+    final position = _player.position;
+    if (position <= const Duration(seconds: 1)) {
+      await _player.seek(_skipSettings.intro);
+    }
+  }
+
+  Future<void> _autoSkipOutroIfNeeded() async {
+    if (!_skipSettings.hasOutro ||
+        !_audioReady ||
+        _autoAdvancing ||
+        !_player.playing ||
+        !_canPlayNext) {
+      return;
+    }
+    final duration = _player.duration ?? Duration.zero;
+    if (duration <= Duration.zero || _skipSettings.outro >= duration) {
+      return;
+    }
+    final remaining = duration - _player.position;
+    if (remaining > Duration.zero && remaining <= _skipSettings.outro) {
+      await _playNextFromAutoAdvance();
+    }
+  }
+
+  Future<void> _playNextWhenCurrentCompleted() async {
+    if (!_audioReady || !_canPlayNext) {
+      return;
+    }
+    await _playNextFromAutoAdvance();
+  }
+
+  Future<void> _playNextFromAutoAdvance() async {
+    if (_autoAdvancing) {
+      return;
+    }
+    _autoAdvancing = true;
+    try {
+      await _playNext();
+    } finally {
+      _autoAdvancing = false;
+    }
   }
 
   bool get _canPlayPrevious =>
@@ -1102,6 +1303,13 @@ class _PlayerPageState extends State<PlayerPage> {
     return '${speed}x';
   }
 
+  String _skipSettingsLabel() {
+    if (!_skipSettings.hasIntro && !_skipSettings.hasOutro) {
+      return '跳过设置';
+    }
+    return '头${_skipSettings.intro.inSeconds}s 尾${_skipSettings.outro.inSeconds}s';
+  }
+
   String _formatDuration(Duration duration) {
     final hours = duration.inHours;
     final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
@@ -1163,6 +1371,66 @@ class _PlayerPageState extends State<PlayerPage> {
       return match.group(1) ?? match.group(2) ?? '';
     }
     return playUrl;
+  }
+}
+
+class _SkipStepper extends StatelessWidget {
+  const _SkipStepper({
+    required this.title,
+    required this.seconds,
+    required this.onChanged,
+  });
+
+  final String title;
+  final int seconds;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F8FA),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(fontWeight: FontWeight.w900),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    seconds == 0 ? '不跳过' : '$seconds 秒',
+                    style: const TextStyle(color: Color(0xFF59606A)),
+                  ),
+                ],
+              ),
+            ),
+            IconButton.filledTonal(
+              tooltip: '减少',
+              onPressed: seconds <= 0
+                  ? null
+                  : () => onChanged((seconds - 5).clamp(0, 600)),
+              icon: const Icon(Icons.remove),
+            ),
+            const SizedBox(width: 8),
+            IconButton.filledTonal(
+              tooltip: '增加',
+              onPressed: seconds >= 600
+                  ? null
+                  : () => onChanged((seconds + 5).clamp(0, 600)),
+              icon: const Icon(Icons.add),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

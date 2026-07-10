@@ -100,6 +100,17 @@ class DownloadCacheRecord {
   bool get isReady => status == 'ready' && filePath.isNotEmpty;
 }
 
+class PlaybackSkipSettings {
+  const PlaybackSkipSettings({required this.intro, required this.outro});
+
+  final Duration intro;
+  final Duration outro;
+
+  bool get hasIntro => intro > Duration.zero;
+
+  bool get hasOutro => outro > Duration.zero;
+}
+
 class LocalLibrary {
   LocalLibrary({AppDatabase? database})
     : _db = database ?? AppDatabase.instance;
@@ -356,6 +367,47 @@ class LocalLibrary {
     )..where((table) => table.name.equals(name))).go();
   }
 
+  Future<PlaybackSkipSettings> playbackSkipSettings() async {
+    final intro = await _settingInt(_SettingKeys.skipIntroSeconds);
+    final outro = await _settingInt(_SettingKeys.skipOutroSeconds);
+    return PlaybackSkipSettings(
+      intro: Duration(seconds: intro.clamp(0, 600)),
+      outro: Duration(seconds: outro.clamp(0, 600)),
+    );
+  }
+
+  Future<void> savePlaybackSkipSettings(PlaybackSkipSettings settings) async {
+    await _saveSetting(
+      _SettingKeys.skipIntroSeconds,
+      settings.intro.inSeconds.clamp(0, 600).toString(),
+    );
+    await _saveSetting(
+      _SettingKeys.skipOutroSeconds,
+      settings.outro.inSeconds.clamp(0, 600).toString(),
+    );
+  }
+
+  Future<int> _settingInt(String key) async {
+    final row =
+        await (_db.select(_db.appSettingEntries)
+              ..where((table) => table.key.equals(key))
+              ..limit(1))
+            .getSingleOrNull();
+    return int.tryParse(row?.value ?? '') ?? 0;
+  }
+
+  Future<void> _saveSetting(String key, String value) {
+    return _db
+        .into(_db.appSettingEntries)
+        .insertOnConflictUpdate(
+          AppSettingEntriesCompanion(
+            key: Value(key),
+            value: Value(value),
+            updatedAt: Value(DateTime.now()),
+          ),
+        );
+  }
+
   LocalBook _bookFromRow(BookshelfEntry row) {
     return LocalBook(
       bookId: row.bookId,
@@ -413,4 +465,9 @@ class LocalLibrary {
     return remaining <= const Duration(seconds: 20) ||
         position.inMilliseconds / duration.inMilliseconds >= 0.95;
   }
+}
+
+class _SettingKeys {
+  static const skipIntroSeconds = 'playback.skip_intro_seconds';
+  static const skipOutroSeconds = 'playback.skip_outro_seconds';
 }

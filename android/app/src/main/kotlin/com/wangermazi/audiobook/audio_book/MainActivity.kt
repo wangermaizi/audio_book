@@ -1,9 +1,13 @@
 package com.wangermazi.audiobook.audio_book
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -13,6 +17,7 @@ import java.io.File
 class MainActivity : AudioServiceActivity() {
     private val updateChannel = "com.wangermazi.audiobook.audio_book/update"
     private val shareChannel = "com.wangermazi.audiobook.audio_book/share"
+    private val systemChannel = "com.wangermazi.audiobook.audio_book/system"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -55,6 +60,27 @@ class MainActivity : AudioServiceActivity() {
                     else -> result.notImplemented()
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, systemChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "requestPostNotifications" -> {
+                        requestPostNotifications()
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun requestPostNotifications() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return
+        }
+        val permission = Manifest.permission.POST_NOTIFICATIONS
+        if (ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+        ActivityCompat.requestPermissions(this, arrayOf(permission), 1001)
     }
 
     private fun installApk(path: String) {

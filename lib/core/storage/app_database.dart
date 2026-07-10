@@ -74,6 +74,15 @@ class CookieEntries extends Table {
   Set<Column<Object>> get primaryKey => {name};
 }
 
+class AppSettingEntries extends Table {
+  TextColumn get key => text()();
+  TextColumn get value => text()();
+  DateTimeColumn get updatedAt => dateTime()();
+
+  @override
+  Set<Column<Object>> get primaryKey => {key};
+}
+
 @DriftDatabase(
   tables: [
     SearchHistoryWords,
@@ -82,6 +91,7 @@ class CookieEntries extends Table {
     ChapterProgressEntries,
     DownloadCacheEntries,
     CookieEntries,
+    AppSettingEntries,
   ],
 )
 class AppDatabase extends _$AppDatabase {
@@ -90,7 +100,7 @@ class AppDatabase extends _$AppDatabase {
   static final AppDatabase instance = AppDatabase();
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration {
@@ -100,6 +110,9 @@ class AppDatabase extends _$AppDatabase {
           await migrator.createTable(chapterProgressEntries);
           await migrator.createTable(downloadCacheEntries);
           await migrator.createTable(cookieEntries);
+        }
+        if (from < 3) {
+          await migrator.createTable(appSettingEntries);
         }
       },
     );
