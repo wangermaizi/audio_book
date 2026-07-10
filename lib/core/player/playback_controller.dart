@@ -6,6 +6,8 @@ import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 
 import 'package:audio_book/core/logger/file_logger.dart';
+import 'package:audio_book/core/network/api_client.dart';
+import 'package:audio_book/core/network/site_config.dart';
 import 'package:audio_book/core/storage/local_library.dart';
 import 'package:audio_book/features/book_detail/book_detail_models.dart';
 import 'package:audio_book/features/player/player_api.dart';
@@ -22,6 +24,7 @@ class PlaybackController {
 
   final AudioPlayer player = AudioPlayer();
   final PlayerApi _api = PlayerApi();
+  final ApiClient _client = ApiClient();
   final LocalLibrary _library = LocalLibrary();
 
   PlayerInfo? _info;
@@ -180,11 +183,13 @@ class PlaybackController {
   Future<AudioSource> _audioSourceFor(PlayerInfo info, String title) async {
     final cache = await _library.downloadCache(info.featureKey);
     final cachedFile = cache?.isReady == true ? File(cache!.filePath) : null;
-    final audioUri = cachedFile != null && await cachedFile.exists()
+    final hasCachedFile = cachedFile != null && await cachedFile.exists();
+    final audioUri = hasCachedFile
         ? Uri.file(cachedFile.path)
         : Uri.parse(info.audioUrl);
     return AudioSource.uri(
       audioUri,
+      headers: hasCachedFile ? null : _audioRequestHeaders(info),
       tag: MediaItem(
         id: info.featureKey,
         title: title,
@@ -192,6 +197,21 @@ class PlaybackController {
         artUri: info.coverUrl.isEmpty ? null : Uri.tryParse(info.coverUrl),
       ),
     );
+  }
+
+  Map<String, String> _audioRequestHeaders(PlayerInfo info) {
+    final headers = <String, String>{
+      'User-Agent': SiteConfig.mobileHeaders['User-Agent']!,
+      'Accept': '*/*',
+      'Accept-Language': SiteConfig.mobileHeaders['Accept-Language']!,
+      'Referer': '${SiteConfig.baseUrl}/play/${info.featureKey}.html',
+      'Origin': SiteConfig.baseUrl,
+    };
+    final cookie = _client.cookie;
+    if (cookie != null && cookie.isNotEmpty) {
+      headers['Cookie'] = cookie;
+    }
+    return headers;
   }
 
   Duration _resumePosition(ChapterProgress? progress) {
